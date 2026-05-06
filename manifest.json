@@ -1,0 +1,16 @@
+{
+  "name": "TapWork",
+  "short_name": "TapWork",
+  "description": "Приложение для сотрудников",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f4f4f5",
+  "theme_color": "#3390ec",
+  "icons": [
+    {
+      "src": "icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
