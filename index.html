@@ -52,7 +52,21 @@
 </head>
 <body style="display: flex; flex-direction: column;">
   <div id="toast">Уведомление</div><div id="loader-screen"><p style="color: gray; font-size: 16px; font-style: italic;">Идентификация...</p></div>
-  <div id="auth-screen" class="hidden scrollable-content" style="max-width: 400px; margin: 0 auto; text-align:center; transition: opacity 0.6s ease;"><h2 style="margin-top:20px;">Вход в систему</h2><p style="color:gray; font-size:14px;">Введите ваш ИИН</p><input type="number" id="iin-input" placeholder="Введите 12 цифр" inputmode="numeric" oninput="manualLogin(this)"><div id="login-error" style="color: #e74c3c; text-align:center; margin-top: 10px;"></div></div>
+  <div id="auth-screen" class="hidden scrollable-content" style="max-width: 400px; margin: 0 auto; text-align:center; transition: opacity 0.6s ease;">
+    <h2 style="margin-top:20px;">Вход в систему</h2>
+    <p style="color:gray; font-size:14px;">Введите ваши данные</p>
+    
+    <!-- Поле для ИИН -->
+    <input type="number" id="iin-input" placeholder="Введите ИИН (12 цифр)" inputmode="numeric">
+    
+    <!-- НОВОЕ: Поле для пароля -->
+    <input type="password" id="password-input" placeholder="Введите пароль">
+    
+    <!-- НОВОЕ: Кнопка для входа -->
+    <button onclick="manualLogin()" class="btn-green" style="margin-top: 15px;">Войти</button>
+    
+    <div id="login-error" style="color: #e74c3c; text-align:center; margin-top: 10px;"></div>
+  </div>
   <div id="main-screen" class="hidden" style="display:flex; flex-direction:column; height:100%; transition: opacity 0.6s ease;">
     <div class="fixed-header glass">
       <div class="header-container"><h2 id="user-greeting" style="margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.5px;"></h2>
@@ -205,30 +219,26 @@
       try { 
         // 1. АВТОРИЗАЦИЯ ЧЕРЕЗ SUPABASE
         if (actionName === "loginByIIN") {
-          const { iin } = payloadData;
+          const { iin, password } = payloadData;
           
-          // Шаг 1: Ищем пользователя только по ИИН
+          // Шаг 1: Ищем пользователя по ИИН
           const { data, error } = await supabaseClient
             .from('users')
             .select('*')
             .eq('iin', iin)
             .single();
 
-          // Если база вернула ошибку или данные пусты
           if (error || !data) {
             console.error("Ошибка поиска ИИН:", error);
             return { success: false, error: "Этот ИИН не найден в базе данных" };
           }
 
-          // Шаг 2: Проверяем скрытый пароль (ИИН наоборот)
-          const reversePass = iin.split('').reverse().join('');
-          
-          if (data.password !== reversePass) {
-            console.error("Ожидаемый пароль:", reversePass, "Пароль в базе:", data.password);
-            return { success: false, error: "Ошибка пароля. В базе указан другой пароль." };
+          // Шаг 2: Напрямую сравниваем введенный пароль с паролем в базе
+          if (data.password !== password) {
+            return { success: false, error: "Неверный пароль" };
           }
 
-          // Если всё верно, пропускаем пользователя
+          // Успешный вход
           return { 
             success: true, 
             token: 'sb_' + data.iin, 
@@ -465,14 +475,55 @@
       }
     }, {passive: true});
     
-    async function manualLogin(el) {
-      if (el && el.value && el.value.length === 12) {
-        document.getElementById("iin-input").disabled = true; showToast("Авторизация...", false, 9999); let res = await callBackend('loginByIIN', { iin: el.value });
-        if (res.success) {
-            appState.iin = res.iin; appState.token = res.token; appState.firstName = res.firstName; appState.currentAction = null; isUserPromoter = res.isPromoter;
-            saveMemory("userIIN", appState.iin); saveMemory("userToken", appState.token); saveMemory("userName", appState.firstName); saveMemory("currentAction", ""); document.getElementById("toast").classList.remove("show"); document.getElementById("auth-screen").style.opacity = '0';
-            setTimeout(() => { document.getElementById("auth-screen").classList.add("hidden"); document.getElementById("main-screen").classList.remove("hidden"); document.getElementById("main-screen").style.opacity = '1'; document.getElementById("user-greeting").innerText = appState.firstName; loadDashboard(false); startPolling(); }, 600);
-        } else { document.getElementById("iin-input").disabled = false; document.getElementById("login-error").innerText = res.error; document.getElementById("toast").classList.remove("show"); }
+    async function manualLogin() {
+      const elIin = document.getElementById("iin-input");
+      const elPass = document.getElementById("password-input");
+      const iinVal = elIin.value;
+      const passVal = elPass.value;
+
+      if (!iinVal || iinVal.length !== 12) {
+          document.getElementById("login-error").innerText = "ИИН должен состоять из 12 цифр";
+          return;
+      }
+      if (!passVal) {
+          document.getElementById("login-error").innerText = "Введите пароль";
+          return;
+      }
+
+      elIin.disabled = true;
+      elPass.disabled = true;
+      showToast("Авторизация...", false, 9999); 
+      
+      let res = await callBackend('loginByIIN', { iin: iinVal, password: passVal });
+      
+      if (res.success) {
+          appState.iin = res.iin; 
+          appState.token = res.token; 
+          appState.firstName = res.firstName; 
+          appState.currentAction = null; 
+          isUserPromoter = res.isPromoter;
+          
+          saveMemory("userIIN", appState.iin); 
+          saveMemory("userToken", appState.token); 
+          saveMemory("userName", appState.firstName); 
+          saveMemory("currentAction", ""); 
+          
+          document.getElementById("toast").classList.remove("show"); 
+          document.getElementById("auth-screen").style.opacity = '0';
+          
+          setTimeout(() => { 
+              document.getElementById("auth-screen").classList.add("hidden"); 
+              document.getElementById("main-screen").classList.remove("hidden"); 
+              document.getElementById("main-screen").style.opacity = '1'; 
+              document.getElementById("user-greeting").innerText = appState.firstName; 
+              loadDashboard(false); 
+              startPolling(); 
+          }, 600);
+      } else { 
+          elIin.disabled = false; 
+          elPass.disabled = false;
+          document.getElementById("login-error").innerText = res.error; 
+          document.getElementById("toast").classList.remove("show"); 
       }
     }
 
