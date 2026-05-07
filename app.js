@@ -28,52 +28,178 @@ function showPushNotification(title, bodyText) { if ("Notification" in window &&
 
 async function callBackend(actionName, payloadData = {}) { 
   try { 
-    // 1. АВТОРИЗАЦИЯ ЧЕРЕЗ SUPABASE
+    // Вспомогательная функция для определения группы лимитов
+    const getRoleGroup = (roleText) => {
+        const r = (roleText || appState.role || "").toLowerCase();
+        if (r.includes("промоутер")) return "Промоутер";
+        if (r.includes("продавец")) return "Продавец";
+        return "Продавец"; // По умолчанию
+    };
+
+    // 1. АВТОРИЗАЦИЯ (Учитываем login_status и новую структуру)
     if (actionName === "loginByIIN") {
       const { iin, password } = payloadData;
       const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).single();
 
       if (error || !data) return { success: false, error: "Этот ИИН не найден в базе данных" };
-      if (data.password !== password) return { success: false, error: "Неверный пароль" };
+      
+      // Проверка пароля (приводим к строке на случай числовых паролей)
+      if (String(data.password) !== String(password)) return { success: false, error: "Неверный пароль" };
 
-      return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, isPromoter: data.role.toLowerCase().includes("промоутер") };
+      // ПРОВЕРКА СТАТУСА ВХОДА (login_status)
+      // В SQL мы записывали 'TRUE'/'FALSE' как строки или булевы значения
+      if (data.login_status === false || data.login_status === 'FALSE' || data.login_status === 'false') {
+          return { success: false, error: "Доступ в систему запрещен администратором" };
+      }
+
+      return { 
+          success: true, 
+          token: 'sb_' + data.iin, 
+          iin: data.iin, 
+          firstName: data.full_name, 
+          role: data.role,
+          dept: data.dept,
+          gender: data.gender,
+          isPromoter: data.role.toLowerCase().includes("промоутер") 
+      };
     }
     
-    // 2. УЧЕТ ВРЕМЕНИ ЧЕРЕЗ SUPABASE
+    // 2. УЧЕТ ВРЕМЕНИ (с определением группы роли)
     if (actionName === "recordAction") {
       const { iin, actionType, isReturn } = payloadData;
-      const { data, error } = await supabaseClient.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход' }]).select();
-      if (error) return { success: false, error: "Ошибка БД" };
+      const roleGroup = getRoleGroup(); // Определяем: Продавец или Промоутер
+
+      if (!isReturn) {
+         // Проверка лимитов перед уходом
+         const dayOfWeek = new Date().getDay() || 7; 
+         const limitField = actionType === 'Обед' ? 'lunch_limit' : (actionType === 'Полдник' ? 'snack_limit' : 'break_limit');
+
+         const { data: limitData } = await supabaseClient.from('time_limits')
+            .select('*')
+            .eq('role_group', roleGroup)
+            .eq('day_of_week', dayOfWeek)
+            .single();
+
+         const maxAllowed = limitData ? limitData[limitField] : 1;
+         const totalAllowed = limitData ? limitData.total_limit : 2;
+
+         const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+
+         const { data: todayLogs } = await supabaseClient.from('time_tracking')
+            .select('*')
+            .eq('role_group', roleGroup)
+            .gte('created_at', todayStart.toISOString());
+
+         let userStates = {};
+         (todayLogs || []).forEach(log => {
+             if (log.direction === 'Уход') userStates[log.iin] = log.action_type;
+             if (log.direction === 'Возврат') delete userStates[log.iin];
+         });
+
+         let activeCounts = { 'Перерыв': 0, 'Обед': 0, 'Полдник': 0 };
+         let totalOut = 0;
+         for (let key in userStates) {
+             activeCounts[userStates[key]]++;
+             totalOut++;
+         }
+
+         if (activeCounts[actionType] >= maxAllowed || totalOut >= totalAllowed) {
+             return { success: false, error: `Мест на ${actionType} нет (лимит: ${maxAllowed})` };
+         }
+      }
+
+      // Запись действия
+      const { error } = await supabaseClient.from('time_tracking').insert([{
+          iin: iin,
+          action_type: actionType,
+          direction: isReturn ? 'Возврат' : 'Уход',
+          role_group: roleGroup
+      }]);
+
+      if (error) return { success: false, error: "Ошибка записи в БД" };
       return { success: true, savedAction: isReturn ? null : actionType };
     }
 
-    // 3. ПЕРЕХВАТ ЗАГРУЗКИ ДАШБОРДА (Заглушка, чтобы интерфейс загрузился)
+    // 3. ПРОВЕРКА СТАТУСОВ ПРИ ЗАГРУЗКЕ
+    if (actionName === "startupCheck") {
+      const roleGroup = getRoleGroup();
+      const dayOfWeek = new Date().getDay() || 7;
+
+      const { data: limitData } = await supabaseClient.from('time_limits').select('*').eq('role_group', roleGroup).eq('day_of_week', dayOfWeek).single();
+      const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+
+      // Тянем логи вместе с именами сотрудников (Join через foreign key)
+      const { data: todayLogs } = await supabaseClient.from('time_tracking')
+        .select('*, users(full_name)')
+        .gte('created_at', todayStart.toISOString())
+        .order('created_at', { ascending: true });
+
+      let activeOutsMap = {};
+      (todayLogs || []).forEach(log => {
+          if (log.direction === 'Уход') {
+              activeOutsMap[log.iin] = { 
+                  action: log.action_type, 
+                  leftAt: new Date(log.created_at).getTime(), 
+                  name: log.users ? log.users.full_name : 'Сотрудник', 
+                  role: log.role_group 
+              };
+          } else {
+              delete activeOutsMap[log.iin];
+          }
+      });
+
+      let myActiveAction = activeOutsMap[payloadData.iin] ? activeOutsMap[payloadData.iin].action : null;
+      let outByAction = { 'Перерыв': 0, 'Обед': 0, 'Полдник': 0 };
+      let totalOut = 0;
+
+      for (let key in activeOutsMap) {
+          if (activeOutsMap[key].role === roleGroup) {
+              outByAction[activeOutsMap[key].action]++;
+              totalOut++;
+          }
+      }
+
+      return { 
+          authorized: true, 
+          activeOuts: Object.values(activeOutsMap).map(o => ({...o, limit: (o.action==='Обед'?40:o.action==='Полдник'?30:10)})), 
+          myActiveAction: myActiveAction,
+          canBreak: (outByAction['Перерыв'] < (limitData?.break_limit || 1)) && (totalOut < (limitData?.total_limit || 2)),
+          canLunch: (outByAction['Обед'] < (limitData?.lunch_limit || 1)) && (totalOut < (limitData?.total_limit || 2)),
+          canSnack: (outByAction['Полдник'] < (limitData?.snack_limit || 1)) && (totalOut < (limitData?.total_limit || 2))
+      };
+    }
+
+    // 4. ДАННЫЕ ПРОФИЛЯ
     if (actionName === "getDashboardData") {
       const { data: userData, error } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
-      
       if (error || !userData) return { authorized: false };
 
+      // Обновляем локальное состояние из свежих данных БД
+      appState.role = userData.role;
+      appState.dept = userData.dept;
+
       return {
-        authorized: true,
-        role: userData.role,
-        name: userData.full_name,
+        authorized: true, 
+        role: userData.role, 
+        name: userData.full_name, 
+        dept: userData.dept,
+        gender: userData.gender,
         isPromoter: userData.role.toLowerCase().includes("промоутер"),
-        info: { dept: "Цифра", kpiValue: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, ptsAccrued: "0", ptsUsed: "0", ptsLeft: "0", ptsFine: "0" },
+        info: { dept: userData.dept || "Цифра", kpiValue: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, ptsAccrued: "0", ptsUsed: "0", ptsLeft: "0", ptsFine: "0" },
         userInbox: [], adminInbox: [], userHistory: [], sellers: [], scItems: []
       };
     }
 
-    // 4. ПЕРЕХВАТ ПРОВЕРКИ СТАТУСА ПРИ СТАРТЕ
-    if (actionName === "startupCheck") {
-      return { authorized: true, needLogin: false, activeOuts: [], canBreak: true, canLunch: true, canSnack: true };
-    }
-
-    // ДЛЯ ВСЕХ ОСТАЛЬНЫХ ЭКШЕНОВ ИДЕМ В СТАРЫЙ GOOGLE SCRIPT
-    const response = await fetch(GAS_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ action: actionName, payload: payloadData }) }); 
+    // ВСЁ ОСТАЛЬНОЕ (СЦ товары, Планы) ТЯНЕМ ИЗ ГУГЛ ТАБЛИЦ
+    const response = await fetch(GAS_URL, { 
+        method: "POST", 
+        headers: { "Content-Type": "text/plain;charset=utf-8" }, 
+        body: JSON.stringify({ action: actionName, payload: payloadData }) 
+    }); 
     return await response.json(); 
   } catch (error) { 
-    console.error("Ошибка callBackend:", error);
-    return { success: false, error: "Ошибка сети", authorized: false }; 
+    console.error("Критическая ошибка бэкенда:", error);
+    return { success: false, error: "Ошибка соединения", authorized: false }; 
   } 
 }
 
