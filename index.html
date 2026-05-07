@@ -179,6 +179,12 @@
       </div>
 
   <script>
+    window.onerror = function(message, source, lineno, colno, error) {
+        alert("ОШИБКА: " + message + " в строке " + lineno);
+    };
+    window.onunhandledrejection = function(event) {
+        alert("ОШИБКА ПРОМИСА: " + event.reason);
+    };
     // Инициализация Supabase
     const SUPABASE_URL = 'https://qvkhfueivkwdqydnhlsr.supabase.co';
     const SUPABASE_KEY = 'sb_publishable_mXpXBbeHRecrahRlDxkDAQ_Xe3zyb5G';
@@ -289,11 +295,36 @@
     }
 
     document.addEventListener("DOMContentLoaded", async () => {
-      requestNotificationPermission(); initAutoScroll(); initSmartDates(); initSwipe(); 
-      const urlParams = new URLSearchParams(window.location.search); const urlIin = urlParams.get('iin');
-      if (urlIin && urlIin.length === 12) { document.getElementById("iin-input").value = urlIin; await manualLogin(document.getElementById("iin-input")); } 
-      else if (appState.iin && appState.token) { document.getElementById("auth-screen").classList.add("hidden"); document.getElementById("main-screen").classList.remove("hidden"); if (appState.firstName) document.getElementById("user-greeting").innerText = appState.firstName; loadDashboard(false); startPolling(); } 
-      else { hideLoader(); document.getElementById("auth-screen").classList.remove("hidden"); }
+      try {
+          requestNotificationPermission(); initAutoScroll(); initSmartDates(); initSwipe(); 
+          const urlParams = new URLSearchParams(window.location.search); const urlIin = urlParams.get('iin');
+          
+          if (urlIin && urlIin.length === 12) { 
+              document.getElementById("iin-input").value = urlIin; 
+              await manualLogin(document.getElementById("iin-input")); 
+          } 
+          else if (appState.iin && appState.token) { 
+              // Если есть токен, пробуем зайти
+              document.getElementById("auth-screen").classList.add("hidden"); 
+              document.getElementById("main-screen").classList.remove("hidden"); 
+              if (appState.firstName) document.getElementById("user-greeting").innerText = appState.firstName; 
+              
+              // Если loadDashboard упадет, сработает catch
+              await loadDashboard(false); 
+              startPolling(); 
+          } 
+          else { 
+              // Иначе просто показываем экран входа
+              hideLoader(); 
+              document.getElementById("auth-screen").classList.remove("hidden"); 
+          }
+      } catch (err) {
+          console.error("Критическая ошибка при старте:", err);
+          alert("Сбой загрузки: очищаю кэш");
+          clearMemory(); // Очищаем старые плохие данные
+          hideLoader();
+          document.getElementById("auth-screen").classList.remove("hidden"); 
+      }
     });
 
     function initSwipe() {
