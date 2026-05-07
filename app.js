@@ -169,38 +169,63 @@ async function callBackend(actionName, payloadData = {}) {
       };
     }
 
-    // 4. ДАННЫЕ ПРОФИЛЯ
+    // 4. ГИБРИДНАЯ ЗАГРУЗКА ДАШБОРДА
     if (actionName === "getDashboardData") {
-      const { data: userData, error } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
-      if (error || !userData) return { authorized: false };
+      const { data: userData } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+      if (!userData) return { authorized: false };
 
-      // Обновляем локальное состояние из свежих данных БД
-      appState.role = userData.role;
-      appState.dept = userData.dept;
+      // А. Получаем статику из Google Таблиц
+      let gasData = { data: { scItems: [], storePlan: [] } };
+      try {
+        const gasResponse = await fetch(GAS_URL, { 
+            method: "POST", 
+            body: JSON.stringify({ action: "getAuxData" }) 
+        });
+        gasData = await gasResponse.json();
+      } catch (e) { console.error("GAS offline"); }
+
+      // Б. Получаем историю и входящие из Supabase
+      const { data: userHistory } = await supabaseClient.from('requests')
+        .select('*')
+        .eq('author_iin', appState.iin)
+        .order('created_at', { ascending: false });
+
+      const { data: userInbox } = await supabaseClient.from('requests')
+        .select('*')
+        .eq('target_iin', appState.iin)
+        .eq('status', 'pending');
 
       return {
-        authorized: true, 
-        role: userData.role, 
-        name: userData.full_name, 
+        authorized: true,
+        role: userData.role,
+        name: userData.full_name,
         dept: userData.dept,
-        gender: userData.gender,
         isPromoter: userData.role.toLowerCase().includes("промоутер"),
-        info: { dept: userData.dept || "Цифра", kpiValue: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, ptsAccrued: "0", ptsUsed: "0", ptsLeft: "0", ptsFine: "0" },
-        userInbox: [], adminInbox: [], userHistory: [], sellers: [], scItems: []
+        // Данные из Google
+        scItems: gasData.data.scItems || [],
+        adminPlan: formatPlanHtml(gasData.data.storePlan),
+        // Данные из Supabase
+        userHistory: userHistory || [],
+        userInbox: userInbox || [],
+        info: { kpiValue: 80, ptsLeft: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0} } // Заглушка KPI
       };
     }
 
-    // ВСЁ ОСТАЛЬНОЕ (СЦ товары, Планы) ТЯНЕМ ИЗ ГУГЛ ТАБЛИЦ
-    const response = await fetch(GAS_URL, { 
-        method: "POST", 
-        headers: { "Content-Type": "text/plain;charset=utf-8" }, 
-        body: JSON.stringify({ action: actionName, payload: payloadData }) 
-    }); 
-    return await response.json(); 
-  } catch (error) { 
-    console.error("Критическая ошибка бэкенда:", error);
-    return { success: false, error: "Ошибка соединения", authorized: false }; 
-  } 
+    // 5. ОТПРАВКА ЗАПРОСА В SUPABASE
+    if (actionName === "submitRequest") {
+      const { type, details, targetIin, metadata } = payloadData;
+      const { error } = await supabaseClient.from('requests').insert([{
+          author_iin: appState.iin,
+          type: type,
+          details: details,
+          target_iin: targetIin,
+          metadata: metadata ? JSON.parse(metadata) : {},
+          status: 'pending'
+      }]);
+
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    } 
 }
 
 function vibrate(ms = 50) { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); else if (navigator.vibrate) navigator.vibrate(ms); }
