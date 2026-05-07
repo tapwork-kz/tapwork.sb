@@ -206,11 +206,36 @@
         // 1. АВТОРИЗАЦИЯ ЧЕРЕЗ SUPABASE
         if (actionName === "loginByIIN") {
           const { iin } = payloadData;
-          const reversePass = iin.split('').reverse().join(''); 
-          // ЗДЕСЬ МЕНЯЕМ supabase НА supabaseClient
-          const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).eq('password', reversePass).single();
-          if (error || !data) return { success: false, error: "Неверный ИИН" };
-          return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, isPromoter: data.role.toLowerCase().includes("промоутер") };
+          
+          // Шаг 1: Ищем пользователя только по ИИН
+          const { data, error } = await supabaseClient
+            .from('users')
+            .select('*')
+            .eq('iin', iin)
+            .single();
+
+          // Если база вернула ошибку или данные пусты
+          if (error || !data) {
+            console.error("Ошибка поиска ИИН:", error);
+            return { success: false, error: "Этот ИИН не найден в базе данных" };
+          }
+
+          // Шаг 2: Проверяем скрытый пароль (ИИН наоборот)
+          const reversePass = iin.split('').reverse().join('');
+          
+          if (data.password !== reversePass) {
+            console.error("Ожидаемый пароль:", reversePass, "Пароль в базе:", data.password);
+            return { success: false, error: "Ошибка пароля. В базе указан другой пароль." };
+          }
+
+          // Если всё верно, пропускаем пользователя
+          return { 
+            success: true, 
+            token: 'sb_' + data.iin, 
+            iin: data.iin, 
+            firstName: data.full_name, 
+            isPromoter: data.role.toLowerCase().includes("промоутер") 
+          };
         }
         
         // 2. УЧЕТ ВРЕМЕНИ ЧЕРЕЗ SUPABASE
