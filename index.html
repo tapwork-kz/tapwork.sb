@@ -6,6 +6,7 @@
   <title>TapWork</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#f4f4f5">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -178,14 +179,48 @@
       </div>
 
   <script>
+    // Инициализация Supabase
+    const SUPABASE_URL = 'https://qvkhfueivkwdqydnhlsr.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_mXpXBbeHRecrahRlDxkDAQ_Xe3zyb5G';
+    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // Старый URL оставляем для гибридных запросов (СЦ, KPI)
     const GAS_URL = "https://script.google.com/macros/s/AKfycbwbxkG4t-70Eoz9Hes44DP5C82F_lWHnBmrzoD_UIKCYVAP54hesdgz6CHVj4_CCzR6pw/exec";
+    
     let tg = window.Telegram ? window.Telegram.WebApp : null; if (tg) { tg.expand(); }
     if ('serviceWorker' in navigator) { window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').then(reg => console.log('SW registered')).catch(err => console.log('SW error', err)); }); }
 
     function safeIin(val) { if(val === undefined || val === null) return ""; return String(val).trim().replace(/^0+/, ''); }
     function requestNotificationPermission() { if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") Notification.requestPermission(); }
     function showPushNotification(title, bodyText) { if ("Notification" in window && Notification.permission === "granted") new Notification(title, { body: bodyText, icon: "icon.png" }); }
-    async function callBackend(actionName, payloadData = {}) { try { const response = await fetch(GAS_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ action: actionName, payload: payloadData }) }); return await response.json(); } catch (error) { return { success: false, error: "Оффлайн режим" }; } }
+    
+    async function callBackend(actionName, payloadData = {}) { 
+      try { 
+        // 1. АВТОРИЗАЦИЯ ЧЕРЕЗ SUPABASE
+        if (actionName === "loginByIIN") {
+          const { iin } = payloadData;
+          const reversePass = iin.split('').reverse().join(''); 
+          const { data, error } = await supabase.from('users').select('*').eq('iin', iin).eq('password', reversePass).single();
+          if (error || !data) return { success: false, error: "Неверный ИИН" };
+          return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, isPromoter: data.role.toLowerCase().includes("промоутер") };
+        }
+        
+        // 2. УЧЕТ ВРЕМЕНИ ЧЕРЕЗ SUPABASE
+        if (actionName === "recordAction") {
+          const { iin, actionType, isReturn } = payloadData;
+          const { data, error } = await supabase.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход' }]).select();
+          if (error) return { success: false, error: "Ошибка БД" };
+          return { success: true, savedAction: isReturn ? null : actionType };
+        }
+
+        // ДЛЯ ВСЕХ ОСТАЛЬНЫХ ЭКШЕНОВ (KPI, Дашборд, Товары) ИДЕМ В СТАРЫЙ GOOGLE SCRIPT
+        const response = await fetch(GAS_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ action: actionName, payload: payloadData }) }); 
+        return await response.json(); 
+      } catch (error) { 
+        console.error(error);
+        return { success: false, error: "Ошибка сети" }; 
+      } 
+    }
     function vibrate(ms = 50) { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); else if (navigator.vibrate) navigator.vibrate(ms); }
 
     let autoScrollAnimation = true; let activeOutsTimer = null; let globalActiveOuts = []; let isUserPromoter = false; let currentAdminScDept = 'Цифра'; let currentEmpDept = 'Цифра'; let currentScTabDept = 'Цифра'; let pollingTimer = null; let lastActiveTab = 'time'; let processedReqIds = new Set(); let tradeInModelsGlobal = []; let selectedTradeInModel = null;
@@ -331,38 +366,37 @@
     }
     function startPolling() {
         if(pollingTimer) clearInterval(pollingTimer);
+        
+        // ПОДПИСКА НА REALTIME ОТ SUPABASE
+        supabase
+          .channel('public-changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'requests' }, payload => {
+             if(appState.token && !document.hidden && !isSensitiveState() && lastActiveTab !== 'inbox') {
+                 loadDashboard(true); // Загружаем данные только когда реально что-то изменилось
+             }
+          })
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'time_tracking' }, async payload => {
+             // Обновляем статусы отсутствующих
+             let state = await callBackend('startupCheck', { token: appState.token, iin: appState.iin });
+             if(state) {
+                 globalActiveOuts = state.activeOuts || [];
+                 if (appState.role.toLowerCase().includes("директор") || appState.role.toLowerCase().includes("заведующий")) {
+                     renderAdminOuts();
+                 }
+             }
+          })
+          .subscribe();
+
+        // РЕДКИЙ ОПРОС (Раз в 30 секунд для подстраховки и таймеров)
         pollingTimer = setInterval(async () => {
-            // 🛑 ЖЕСТКАЯ БЛОКИРОВКА: Если открыты "Входящие", полностью отключаем опрос сервера
-            if (lastActiveTab === 'inbox') return;
-
+            if (lastActiveTab === 'inbox' || isSensitiveState()) return;
             if(appState.token && !document.hidden) {
-                if (isSensitiveState()) return;
-
                 let data = await callBackend('getDashboardData', { token: appState.token }); 
-                if (!data || data.error === "Оффлайн режим") return; 
-                if (data.authorized === false) { forceLogout(); return; } 
-                
-                // Двойная проверка перед перерисовкой
-                if (!isSensitiveState() && lastActiveTab !== 'inbox') {
+                if (data && data.authorized !== false && !isSensitiveState() && lastActiveTab !== 'inbox') {
                     renderDashboardData(data, true);
                 }
-                
-                if (!isSensitiveState() && lastActiveTab !== 'inbox') {
-                    let state = await callBackend('startupCheck', { token: appState.token, iin: appState.iin, tgUserId: null }); 
-                    if(state && state.authorized !== false) { 
-                        globalActiveOuts = state.activeOuts || [];
-                        let roleStr = String(data.role || "").toLowerCase(); 
-                        let isDir = roleStr.includes("директор") || roleStr.includes("управляющий") || roleStr.includes("админ") || roleStr.includes("супервайзер");
-                        let isZavSklad = roleStr.includes("заведующий складом");
-                        if(!isDir && !isZavSklad) { 
-                            appState.currentAction = state.myActiveAction || ""; saveMemory("currentAction", appState.currentAction); renderTimeUI(); applyLimits(state); 
-                        } else if (isDir || isZavSklad) {
-                            if (!document.getElementById("content-adm-outs").classList.contains("hidden")) renderAdminOuts();
-                        }
-                    }
-                }
             }
-        }, 5000);
+        }, 30000);
     }
 
     document.addEventListener('touchstart', function(e) {
@@ -987,25 +1021,18 @@
       document.getElementById("details-title").innerText = "КФ. ЭФФ: " + emp.name; 
       document.getElementById("details-kpi-circle-container").innerHTML = ""; 
       
-      // Делаем контейнер прозрачным, так как карточки будут внутри
-      let listHtml = "<div class='card' style='padding:0; background:transparent; border:none; box-shadow:none;'>"; 
-      
-      // Группируем по месяцам и линиям (используем существующую функцию)
-      listHtml += groupAndRenderByMonth(emp.kpiDetails || [], k => {
+      let listHtml = "<div class='card' style='padding:0;'>"; 
+      emp.kpiDetails.forEach(k => { 
         let col = k.val > 0 ? 'detail-plus' : (k.val < 0 ? 'detail-minus' : 'detail-val'); 
         let valStr = k.val > 0 ? `+${k.val}%` : `${k.val}%`; 
         let srcColor = getSourceColor(k.source); 
         let dispName = k.name.replace(/^(Фокус|Trade-In|СЦ|Горячий чек)[\s\|:]*/i, '').trim(); 
-        
         if (!dispName) dispName = k.name; 
         if (k.source === "База" || k.name === "Ошибки") dispName = k.name; 
         if (k.name === "Больничный" || k.name === "Прогул") { dispName = k.name; srcColor = "#7f8c8d"; } 
-        let dateStr = k.date ? `<span style="color:gray;font-size:10px;">${k.date}</span>` : ""; 
-        
-        // Рендерим элемент в стиле истории (с цветным бортиком слева)
-        return `<div class="req-item" style="border-left-color: ${srcColor}; border-left-width: 2px; padding: 8px 10px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;"><div style="flex:1;"><span style="color:var(--text-color); font-size:12px; display:inline-block; margin-bottom:3px;">${dispName}</span><br><div style="display:flex; justify-content:space-between; align-items:center;"><div><b style="color:${srcColor}; font-size:10px;">${k.source}</b></div><div>${dateStr}</div></div></div><span class="${col}" style="margin-left:10px;">${valStr}</span></div>`;
-      });
-      
+        let dateStr = k.date ? `<span style="color:gray;font-size:10px; margin-left:5px;"> • ${k.date}</span>` : ""; 
+        listHtml += `<div class="detail-item"><div><span style="color:var(--text-color); font-size:12px; display:inline-block; margin-bottom:3px;">${dispName}</span><br><b style="color:${srcColor}; font-size:10px;">${k.source}</b>${dateStr}</div><span class="${col}">${valStr}</span></div>`; 
+      }); 
       listHtml += "</div>"; 
       document.getElementById("details-list").innerHTML = listHtml; 
     }
