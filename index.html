@@ -220,49 +220,52 @@
         // 1. АВТОРИЗАЦИЯ ЧЕРЕЗ SUPABASE
         if (actionName === "loginByIIN") {
           const { iin, password } = payloadData;
-          
-          // Шаг 1: Ищем пользователя по ИИН
-          const { data, error } = await supabaseClient
-            .from('users')
-            .select('*')
-            .eq('iin', iin)
-            .single();
+          const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).single();
 
-          if (error || !data) {
-            console.error("Ошибка поиска ИИН:", error);
-            return { success: false, error: "Этот ИИН не найден в базе данных" };
-          }
+          if (error || !data) return { success: false, error: "Этот ИИН не найден в базе данных" };
+          if (data.password !== password) return { success: false, error: "Неверный пароль" };
 
-          // Шаг 2: Напрямую сравниваем введенный пароль с паролем в базе
-          if (data.password !== password) {
-            return { success: false, error: "Неверный пароль" };
-          }
-
-          // Успешный вход
-          return { 
-            success: true, 
-            token: 'sb_' + data.iin, 
-            iin: data.iin, 
-            firstName: data.full_name, 
-            isPromoter: data.role.toLowerCase().includes("промоутер") 
-          };
+          return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, isPromoter: data.role.toLowerCase().includes("промоутер") };
         }
         
         // 2. УЧЕТ ВРЕМЕНИ ЧЕРЕЗ SUPABASE
         if (actionName === "recordAction") {
           const { iin, actionType, isReturn } = payloadData;
-          // ЗДЕСЬ МЕНЯЕМ supabase НА supabaseClient
           const { data, error } = await supabaseClient.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход' }]).select();
           if (error) return { success: false, error: "Ошибка БД" };
           return { success: true, savedAction: isReturn ? null : actionType };
         }
 
-        // ДЛЯ ВСЕХ ОСТАЛЬНЫХ ЭКШЕНОВ (KPI, Дашборд, Товары) ИДЕМ В СТАРЫЙ GOOGLE SCRIPT
+        // 3. ПЕРЕХВАТ ЗАГРУЗКИ ДАШБОРДА (Заглушка, чтобы интерфейс загрузился)
+        if (actionName === "getDashboardData") {
+          // Запрашиваем актуальную роль пользователя из Supabase
+          const { data: userData, error } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+          
+          if (error || !userData) return { authorized: false };
+
+          return {
+            authorized: true,
+            role: userData.role,
+            name: userData.full_name,
+            isPromoter: userData.role.toLowerCase().includes("промоутер"),
+            // Временные пустые данные, пока мы не перенесем расчеты
+            info: { dept: "Цифра", kpiValue: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, ptsAccrued: "0", ptsUsed: "0", ptsLeft: "0", ptsFine: "0" },
+            userInbox: [], adminInbox: [], userHistory: [], sellers: [], scItems: []
+          };
+        }
+
+        // 4. ПЕРЕХВАТ ПРОВЕРКИ СТАТУСА ПРИ СТАРТЕ (Лимиты на обед/перерыв)
+        if (actionName === "startupCheck") {
+          return { authorized: true, needLogin: false, activeOuts: [], canBreak: true, canLunch: true, canSnack: true };
+        }
+
+        // ДЛЯ ВСЕХ ОСТАЛЬНЫХ ЭКШЕНОВ ИДЕМ В СТАРЫЙ GOOGLE SCRIPT
         const response = await fetch(GAS_URL, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ action: actionName, payload: payloadData }) }); 
         return await response.json(); 
       } catch (error) { 
-        console.error(error);
-        return { success: false, error: "Ошибка сети" }; 
+        console.error("Ошибка callBackend:", error);
+        // Возвращаем authorized: false, чтобы приложение не зависло при ошибке сети
+        return { success: false, error: "Ошибка сети", authorized: false }; 
       } 
     }
     function vibrate(ms = 50) { if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light'); else if (navigator.vibrate) navigator.vibrate(ms); }
