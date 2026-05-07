@@ -9,7 +9,7 @@
   <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#f4f4f5">
-  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="TapWork">
   <link rel="apple-touch-icon" href="icon.png">
@@ -185,10 +185,11 @@
     window.onunhandledrejection = function(event) {
         alert("ОШИБКА ПРОМИСА: " + event.reason);
     };
-    // Инициализация Supabase
+    // Инициализация Supabase. 
+    // Мы назвали переменную supabaseClient, чтобы не конфликтовать с библиотекой.
     const SUPABASE_URL = 'https://qvkhfueivkwdqydnhlsr.supabase.co';
     const SUPABASE_KEY = 'sb_publishable_mXpXBbeHRecrahRlDxkDAQ_Xe3zyb5G';
-    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
     // Старый URL оставляем для гибридных запросов (СЦ, KPI)
     const GAS_URL = "https://script.google.com/macros/s/AKfycbwbxkG4t-70Eoz9Hes44DP5C82F_lWHnBmrzoD_UIKCYVAP54hesdgz6CHVj4_CCzR6pw/exec";
@@ -206,7 +207,8 @@
         if (actionName === "loginByIIN") {
           const { iin } = payloadData;
           const reversePass = iin.split('').reverse().join(''); 
-          const { data, error } = await supabase.from('users').select('*').eq('iin', iin).eq('password', reversePass).single();
+          // ЗДЕСЬ МЕНЯЕМ supabase НА supabaseClient
+          const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).eq('password', reversePass).single();
           if (error || !data) return { success: false, error: "Неверный ИИН" };
           return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, isPromoter: data.role.toLowerCase().includes("промоутер") };
         }
@@ -214,7 +216,8 @@
         // 2. УЧЕТ ВРЕМЕНИ ЧЕРЕЗ SUPABASE
         if (actionName === "recordAction") {
           const { iin, actionType, isReturn } = payloadData;
-          const { data, error } = await supabase.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход' }]).select();
+          // ЗДЕСЬ МЕНЯЕМ supabase НА supabaseClient
+          const { data, error } = await supabaseClient.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход' }]).select();
           if (error) return { success: false, error: "Ошибка БД" };
           return { success: true, savedAction: isReturn ? null : actionType };
         }
@@ -398,16 +401,15 @@
     function startPolling() {
         if(pollingTimer) clearInterval(pollingTimer);
         
-        // ПОДПИСКА НА REALTIME ОТ SUPABASE
-        supabase
+        // ЗДЕСЬ МЕНЯЕМ supabase НА supabaseClient
+        supabaseClient
           .channel('public-changes')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'requests' }, payload => {
              if(appState.token && !document.hidden && !isSensitiveState() && lastActiveTab !== 'inbox') {
-                 loadDashboard(true); // Загружаем данные только когда реально что-то изменилось
+                 loadDashboard(true);
              }
           })
           .on('postgres_changes', { event: '*', schema: 'public', table: 'time_tracking' }, async payload => {
-             // Обновляем статусы отсутствующих
              let state = await callBackend('startupCheck', { token: appState.token, iin: appState.iin });
              if(state) {
                  globalActiveOuts = state.activeOuts || [];
