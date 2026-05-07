@@ -11,7 +11,7 @@ const SUPABASE_KEY = 'sb_publishable_mXpXBbeHRecrahRlDxkDAQ_Xe3zyb5G';
 const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // Старый URL оставляем для гибридных запросов (СЦ, KPI)
-const GAS_URL = "https://script.google.com/macros/s/AKfycbxb2UW5ctVar9QhWmjI-IIFA1EOxDCovRDoNBcbN31x4L4-mCh1lGcF-ZdH-62pUrbR/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbwbxkG4t-70Eoz9Hes44DP5C82F_lWHnBmrzoD_UIKCYVAP54hesdgz6CHVj4_CCzR6pw/exec";
 
 let tg = window.Telegram ? window.Telegram.WebApp : null; 
 if (tg) { tg.expand(); }
@@ -153,7 +153,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           document.getElementById("main-screen").classList.remove("hidden"); 
           if (appState.firstName) document.getElementById("user-greeting").innerText = appState.firstName; 
           await loadDashboard(false); 
-          startPolling(); 
+          startPolling(); // <--- Вот здесь мы запускаем слушатель, который описан ниже
       } 
       else { 
           hideLoader(); 
@@ -229,12 +229,15 @@ function startPolling() {
              loadDashboard(true);
          }
       })
+      // ВОТ СЮДА НУЖНО БЫЛО ВСТАВИТЬ ОБНОВЛЕНИЕ ЛИМИТОВ
       .on('postgres_changes', { event: '*', schema: 'public', table: 'time_tracking' }, async payload => {
          let state = await callBackend('startupCheck', { token: appState.token, iin: appState.iin });
          if(state) {
              globalActiveOuts = state.activeOuts || [];
              if (appState.role.toLowerCase().includes("директор") || appState.role.toLowerCase().includes("заведующий")) {
                  renderAdminOuts();
+             } else {
+                 applyLimits(state); // <--- МГНОВЕННАЯ БЛОКИРОВКА КНОПОК
              }
          }
       })
