@@ -136,7 +136,6 @@ async function callBackend(actionName, payloadData = {}) {
 
     // --- ГЛАВНАЯ ЗАГРУЗКА ДАННЫХ (ГИБРИД: Supabase + GAS) ---
     if (actionName === "getDashboardData") {
-      // 1. Берем инфу о юзере из Supabase
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       if (userErr || !userData) return { authorized: false };
 
@@ -145,9 +144,13 @@ async function callBackend(actionName, payloadData = {}) {
       try {
         const gasResponse = await fetch(GAS_URL, { 
             method: "POST", 
+            // ЗАГОЛОВКИ ДОБАВЛЕНЫ СЮДА:
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
             body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role } }) 
         });
         gasData = await gasResponse.json();
+        // ВЫВОДИМ ОТВЕТ В КОНСОЛЬ
+        console.log("Ответ от Google Таблиц:", gasData);
       } catch (e) { 
         console.error("Ошибка связи с Google Таблицами:", e); 
       }
@@ -191,7 +194,6 @@ async function callBackend(actionName, payloadData = {}) {
     } 
 
   } catch (error) {
-    // ВОТ ТОТ САМЫЙ ВОССТАНОВЛЕННЫЙ БЛОК CATCH
     console.error("Критическая ошибка:", error);
     return { success: false, error: "Системная ошибка сети или базы данных" };
   }
