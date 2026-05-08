@@ -52,17 +52,29 @@ async function callBackend(actionName, payloadData = {}) {
         return "Продавец"; 
     };
 
+    // --- АВТОРИЗАЦИЯ (Supabase) ---
     if (actionName === "loginByIIN") {
       const { iin, password } = payloadData;
       const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).single();
+      
       if (error || !data) return { success: false, error: "Этот ИИН не найден в базе данных" };
       if (String(data.password) !== String(password)) return { success: false, error: "Неверный пароль" };
       if (data.login_status === false || data.login_status === 'FALSE' || data.login_status === 'false') {
           return { success: false, error: "Доступ в систему запрещен администратором" };
       }
-      return { success: true, token: 'sb_' + data.iin, iin: data.iin, firstName: data.full_name, role: data.role, dept: data.dept, gender: data.gender, isPromoter: data.role.toLowerCase().includes("промоутер") };
+      return { 
+          success: true, 
+          token: 'sb_' + data.iin, 
+          iin: data.iin, 
+          firstName: data.full_name, 
+          role: data.role, 
+          dept: data.dept, 
+          gender: data.gender, 
+          isPromoter: data.role.toLowerCase().includes("промоутер") 
+      };
     }
     
+    // --- ЗАПИСЬ ДЕЙСТВИЙ ВРЕМЕНИ (Supabase) ---
     if (actionName === "recordAction") {
       const { iin, actionType, isReturn } = payloadData;
       const roleGroup = getRoleGroup(); 
@@ -70,10 +82,12 @@ async function callBackend(actionName, payloadData = {}) {
          const dayOfWeek = new Date().getDay() || 7; 
          const limitField = actionType === 'Обед' ? 'lunch_limit' : (actionType === 'Полдник' ? 'snack_limit' : 'break_limit');
          const { data: limitData } = await supabaseClient.from('time_limits').select('*').eq('role_group', roleGroup).eq('day_of_week', dayOfWeek).single();
+         
          const maxAllowed = limitData ? limitData[limitField] : 1;
          const totalAllowed = limitData ? limitData.total_limit : 2;
          const todayStart = new Date(); todayStart.setHours(0,0,0,0);
          const { data: todayLogs } = await supabaseClient.from('time_tracking').select('*').eq('role_group', roleGroup).gte('created_at', todayStart.toISOString());
+         
          let userStates = {};
          (todayLogs || []).forEach(log => {
              if (log.direction === 'Уход') userStates[log.iin] = log.action_type;
@@ -82,6 +96,7 @@ async function callBackend(actionName, payloadData = {}) {
          let activeCounts = { 'Перерыв': 0, 'Обед': 0, 'Полдник': 0 };
          let totalOut = 0;
          for (let key in userStates) { activeCounts[userStates[key]]++; totalOut++; }
+         
          if (activeCounts[actionType] >= maxAllowed || totalOut >= totalAllowed) return { success: false, error: `Мест на ${actionType} нет (лимит: ${maxAllowed})` };
       }
       const { error } = await supabaseClient.from('time_tracking').insert([{ iin: iin, action_type: actionType, direction: isReturn ? 'Возврат' : 'Уход', role_group: roleGroup }]);
@@ -89,12 +104,14 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true, savedAction: isReturn ? null : actionType };
     }
 
+    // --- ПРОВЕРКА ЛИМИТОВ ПРИ ЗАПУСКЕ (Supabase) ---
     if (actionName === "startupCheck") {
       const roleGroup = getRoleGroup();
       const dayOfWeek = new Date().getDay() || 7;
       const { data: limitData } = await supabaseClient.from('time_limits').select('*').eq('role_group', roleGroup).eq('day_of_week', dayOfWeek).single();
       const todayStart = new Date(); todayStart.setHours(0,0,0,0);
       const { data: todayLogs } = await supabaseClient.from('time_tracking').select('*, users(full_name)').gte('created_at', todayStart.toISOString()).order('created_at', { ascending: true });
+      
       let activeOutsMap = {};
       (todayLogs || []).forEach(log => {
           if (log.direction === 'Уход') {
@@ -117,34 +134,66 @@ async function callBackend(actionName, payloadData = {}) {
       };
     }
 
+    // --- ГЛАВНАЯ ЗАГРУЗКА ДАННЫХ (ГИБРИД: Supabase + GAS) ---
     if (actionName === "getDashboardData") {
-      const { data: userData } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
-      if (!userData) return { authorized: false };
-      let gasData = { data: { scItems: [], storePlan: [] } };
+      // 1. Берем инфу о юзере из Supabase
+      const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+      if (userErr || !userData) return { authorized: false };
+
+      // 2. Делаем запрос в Google Таблицы (GAS) за гибридными данными
+      let gasData = {};
       try {
-        const gasResponse = await fetch(GAS_URL, { method: "POST", body: JSON.stringify({ action: "getAuxData", payload: { dept: userData.dept } }) });
+        const gasResponse = await fetch(GAS_URL, { 
+            method: "POST", 
+            body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role } }) 
+        });
         gasData = await gasResponse.json();
-      } catch (e) { console.error("GAS offline"); }
+      } catch (e) { 
+        console.error("Ошибка связи с Google Таблицами:", e); 
+      }
+
+      // 3. Добираем запросы и историю из Supabase
       const { data: userHistory } = await supabaseClient.from('requests').select('*').eq('author_iin', appState.iin).order('created_at', { ascending: false });
       const { data: userInbox } = await supabaseClient.from('requests').select('*').eq('target_iin', appState.iin).eq('status', 'pending');
+      
+      // 4. Склеиваем всё вместе для фронтенда
       return {
-        authorized: true, role: userData.role, name: userData.full_name, dept: userData.dept, isPromoter: userData.role.toLowerCase().includes("промоутер"),
-        scItems: gasData.data.scItems || [], adminPlan: formatPlanHtml(gasData.data.storePlan), userHistory: userHistory || [], userInbox: userInbox || [],
-        info: { kpiValue: 80, ptsLeft: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0} }
+        authorized: true, 
+        role: userData.role, 
+        name: userData.full_name, 
+        dept: userData.dept, 
+        isPromoter: userData.role.toLowerCase().includes("промоутер"),
+        
+        // Данные из GAS
+        scItems: gasData.scItems || [], 
+        adminPlan: gasData.adminPlan || formatPlanHtml([]), 
+        info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
+        
+        // Данные из Supabase
+        userHistory: userHistory || [], 
+        userInbox: userInbox || []
       };
     }
 
+    // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
     if (actionName === "submitRequest") {
       const { type, details, targetIin, metadata } = payloadData;
-      const { error } = await supabaseClient.from('requests').insert([{ author_iin: appState.iin, type: type, details: details, target_iin: targetIin, metadata: metadata ? JSON.parse(metadata) : {}, status: 'pending' }]);
+      const { error } = await supabaseClient.from('requests').insert([{ 
+          author_iin: appState.iin, 
+          type: type, 
+          details: details, 
+          target_iin: targetIin, 
+          metadata: metadata ? JSON.parse(metadata) : {}, 
+          status: 'pending' 
+      }]);
       if (error) return { success: false, error: error.message };
       return { success: true };
     } 
 
-    // БЛОК CATCH, КОТОРЫЙ БЫЛ УДАЛЕН И ИЗ-ЗА КОТОРОГО ВСЁ СЛОМАЛОСЬ
   } catch (error) {
+    // ВОТ ТОТ САМЫЙ ВОССТАНОВЛЕННЫЙ БЛОК CATCH
     console.error("Критическая ошибка:", error);
-    return { success: false, error: "Системная ошибка сети" };
+    return { success: false, error: "Системная ошибка сети или базы данных" };
   }
 }
 
