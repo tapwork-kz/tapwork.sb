@@ -146,7 +146,7 @@ async function callBackend(actionName, payloadData = {}) {
             method: "POST", 
             // ЗАГОЛОВКИ ДОБАВЛЕНЫ СЮДА:
             headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role } }) 
+            body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
         });
         gasData = await gasResponse.json();
         // ВЫВОДИМ ОТВЕТ В КОНСОЛЬ
