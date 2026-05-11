@@ -144,8 +144,8 @@ async function callBackend(actionName, payloadData = {}) {
       try {
         const gasResponse = await fetch(GAS_URL, { 
             method: "POST", 
-            // ЗАГОЛОВКИ ДОБАВЛЕНЫ СЮДА:
             headers: { "Content-Type": "text/plain;charset=utf-8" },
+            redirect: "follow", // <--- ДОБАВИТЬ ЭТУ СТРОЧКУ
             body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
         });
         gasData = await gasResponse.json();
