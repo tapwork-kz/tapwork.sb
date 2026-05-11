@@ -170,6 +170,7 @@ async function callBackend(actionName, payloadData = {}) {
         // Данные из GAS
         scItems: gasData.scItems || [], 
         adminPlan: gasData.adminPlan || formatPlanHtml([]), 
+        tradeInModels: gasData.tradeInModels || [], // <--- ВОТ ЭТУ СТРОЧКУ НУЖНО ДОБАВИТЬ!
         info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
         
         // Данные из Supabase
