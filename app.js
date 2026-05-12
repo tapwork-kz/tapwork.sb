@@ -499,7 +499,8 @@ async function callBackend(actionName, payloadData = {}) {
         adminInbox: adminInbox,       // Теперь админ получит заявки!
         adminHistory: adminHistory    // И свою историю тоже
       };
-
+    }
+    
     // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
     if (actionName === "submitRequest") {
       const { type, details, targetIin, metadata } = payloadData;
