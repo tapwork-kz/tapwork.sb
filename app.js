@@ -156,9 +156,90 @@ async function callBackend(actionName, payloadData = {}) {
       }
 
       // 3. Добираем запросы и историю из Supabase
-      const { data: userHistory } = await supabaseClient.from('requests').select('*').eq('author_iin', appState.iin).order('created_at', { ascending: false });
-      const { data: userInbox } = await supabaseClient.from('requests').select('*').eq('target_iin', appState.iin).eq('status', 'pending');
+      // Сначала получаем всех юзеров, чтобы подставлять красивые ФИО вместо ИИН
+      const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
+      let userMap = {};
+      if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
+
+      // Скачиваем ВСЕ заявки
+      const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
       
+      let userInbox = [], userHistory = [], adminInbox = [], adminHistory = [];
+      let isDir = userData.role.toLowerCase().includes("директор") || userData.role.toLowerCase().includes("управляющий") || userData.role.toLowerCase().includes("админ") || userData.role.toLowerCase().includes("супервайзер");
+      let isZavSklad = userData.role.toLowerCase().includes("заведующий складом");
+
+      if (allReqs) {
+          allReqs.forEach(r => {
+              let author = userMap[r.author_iin] || {};
+              let target = userMap[r.target_iin] || {};
+              
+              // Форматируем дату для фронтенда (dd.mm.yyyy hh:mm)
+              let d = new Date(r.created_at);
+              let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+              
+              // Собираем объект в том формате, который понимает renderDashboardData
+              let reqObj = {
+                  id: r.id,
+                  date: dateStr,
+                  authorIin: r.author_iin,
+                  authorName: author.full_name || r.author_iin,
+                  authorRole: author.role || "Продавец",
+                  adminDisplayName: author.dept ? `${author.full_name} — ${author.dept}` : author.full_name,
+                  type: r.type,
+                  details: r.details,
+                  targetIin: r.target_iin,
+                  targetName: target.full_name || "",
+                  status: r.status === 'pending' ? 'pending_admin' : r.status, // подстраховка
+                  meta: r.metadata ? JSON.stringify(r.metadata) : "{}"
+              };
+
+              let isDismissedByMe = false;
+              try { 
+                  let m = r.metadata || {}; 
+                  if (m.dismissedBy && m.dismissedBy.includes(appState.iin)) isDismissedByMe = true; 
+              } catch(e) {}
+
+              // === ЛОГИКА АДМИНА ===
+              if (isDir) {
+                  if (reqObj.status === "pending_admin" || reqObj.status === "pending_admin_view") adminInbox.push(reqObj);
+                  if (reqObj.status === "pending_admin_view_remark" && !isDismissedByMe) adminInbox.push(reqObj);
+                  if (reqObj.type === "Замечание" && reqObj.status === "pending_user_reply" && reqObj.authorIin !== appState.iin && !isDismissedByMe) adminInbox.push(reqObj);
+                  
+                  if (["approved", "rejected", "viewed", "rejected_by_user", "rejected_notify_user", "approved_notify_zav", "rejected_notify_zav"].includes(reqObj.status) || isDismissedByMe) {
+                      if (adminHistory.length < 200) adminHistory.push(reqObj);
+                  }
+              }
+
+              // === ЛОГИКА ЗАВ. СКЛАДОМ ===
+              if (isZavSklad) {
+                  if ((reqObj.status === "rejected_notify_zav" || reqObj.status === "approved_notify_zav") && reqObj.authorIin === appState.iin) userInbox.push(reqObj);
+                  else if (reqObj.status === "pending_user" && reqObj.targetIin === appState.iin) userInbox.push(reqObj);
+                  else if (reqObj.status === "rejected_notify_user" && reqObj.authorIin === appState.iin) userInbox.push(reqObj);
+                  else if (reqObj.status === "pending_user_reply" && reqObj.targetIin === appState.iin) userInbox.push(reqObj);
+                  else if (reqObj.type === "Замечание" && (reqObj.status === "pending_user_reply" || reqObj.status === "pending_admin_view_remark") && reqObj.targetIin !== appState.iin && reqObj.authorIin !== appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  else if (reqObj.status === "notify_user_fine" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  
+                  if (["approved", "rejected", "viewed", "rejected_by_user", "rejected_notify_user", "approved_notify_zav", "rejected_notify_zav", "viewed_fine"].includes(reqObj.status) || isDismissedByMe) {
+                      if (adminHistory.length < 200) adminHistory.push(reqObj);
+                  }
+              }
+              
+              // === ЛОГИКА ПРОДАВЦА ===
+              if (!isDir && !isZavSklad) {
+                  if (reqObj.status === "pending_user" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  else if (reqObj.status === "rejected_notify_user" && reqObj.authorIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  else if (reqObj.status === "pending_user_reply" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  else if (reqObj.status === "notify_user_fine" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+              }
+
+              // === ОБЩАЯ ИСТОРИЯ ===
+              let isClosedForUser = ["approved", "rejected", "viewed", "rejected_by_user", "approved_notify_zav", "rejected_notify_zav", "rejected_notify_user", "viewed_fine"].includes(reqObj.status);
+              if ((reqObj.authorIin === appState.iin || reqObj.targetIin === appState.iin) && (isClosedForUser || (reqObj.status === "pending_admin_view_remark" && reqObj.targetIin === appState.iin) || isDismissedByMe)) {
+                  if (userHistory.length < 50) userHistory.push(reqObj);
+              }
+          });
+      }
+
       // 4. Склеиваем всё вместе для фронтенда
       return {
         authorized: true, 
@@ -167,17 +248,16 @@ async function callBackend(actionName, payloadData = {}) {
         dept: userData.dept, 
         isPromoter: userData.role.toLowerCase().includes("промоутер"),
         
-        // Данные из GAS
         scItems: gasData.scItems || [], 
         adminPlan: gasData.adminPlan || formatPlanHtml([]), 
-        tradeInModels: gasData.tradeInModels || [], // <--- ВОТ ЭТУ СТРОЧКУ НУЖНО ДОБАВИТЬ!
+        tradeInModels: gasData.tradeInModels || [], 
         info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
         
-        // Данные из Supabase
-        userHistory: userHistory || [], 
-        userInbox: userInbox || []
+        userHistory: userHistory, 
+        userInbox: userInbox,
+        adminInbox: adminInbox,       // Теперь админ получит заявки!
+        adminHistory: adminHistory    // И свою историю тоже
       };
-    }
 
     // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
     if (actionName === "submitRequest") {
