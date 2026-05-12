@@ -140,14 +140,16 @@ async function callBackend(actionName, payloadData = {}) {
     if (actionName === "processRequest") {
       const { reqId, reqAction, replyText } = payloadData;
       
-      // Получаем сам запрос и данные пользователя, который нажал кнопку
+      // Получаем сам запрос и данные пользователя
       const { data: req, error: reqErr } = await supabaseClient.from('requests').select('*').eq('id', reqId).single();
       const { data: currentUser } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       
       if (reqErr || !req) return { success: false, error: "Запрос не найден" };
       
+      // Убираем случайные пробелы, которые ломают условия!
       let currentStatus = String(req.status || "").trim();
       let reqType = String(req.type || "").trim();
+      
       let newStatus = currentStatus;
       let newDetails = req.details;
       let metaObj = {};
@@ -215,34 +217,21 @@ async function callBackend(actionName, payloadData = {}) {
                   
                   if (reqType === "Запрос на штраф") {
                       await supabaseClient.from('user_details').insert([{
-                          iin: req.target_iin,
-                          type: "Штраф",
-                          action_text: metaObj.reason || req.details,
-                          points_motivation: -(Math.abs(parseFloat(metaObj.amount) || 0)),
-                          fine_money: -(Math.abs(parseFloat(metaObj.moneyAmount) || 0)),
-                          manager_iin: req.author_iin
+                          iin: req.target_iin, type: "Штраф", action_text: metaObj.reason || req.details,
+                          points_motivation: -(Math.abs(parseFloat(metaObj.amount) || 0)), fine_money: -(Math.abs(parseFloat(metaObj.moneyAmount) || 0)), manager_iin: req.author_iin
                       }]);
                       await supabaseClient.from('requests').insert([{
-                          author_iin: req.author_iin,
-                          type: "Уведомление о штрафе",
-                          details: metaObj.reason || req.details,
-                          target_iin: req.target_iin,
-                          status: "notify_user_fine",
-                          metadata: metaObj
+                          author_iin: req.author_iin, type: "Уведомление о штрафе", details: metaObj.reason || req.details,
+                          target_iin: req.target_iin, status: "notify_user_fine", metadata: metaObj
                       }]);
-                      newStatus = "approved_notify_zav";
-                      isHandled = true; responseMsg = "Штраф одобрен";
+                      newStatus = "approved_notify_zav"; isHandled = true; responseMsg = "Штраф одобрен";
                   }
                   else if (reqType === "Горячий чек") {
                       await supabaseClient.from('user_details').insert([{
-                          iin: req.author_iin,
-                          type: "Горячий чек",
-                          action_text: req.details,
-                          points_motivation: parseFloat(metaObj.pts) || 0,
-                          kpi_change: parseFloat(metaObj.bonus) || 0
+                          iin: req.author_iin, type: "Горячий чек", action_text: req.details,
+                          points_motivation: parseFloat(metaObj.pts) || 0, kpi_change: parseFloat(metaObj.bonus) || 0
                       }]);
-                      newStatus = "approved";
-                      isHandled = true; responseMsg = "Одобрено";
+                      newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
                   }
                   else if (reqType === "Продажа СЦ/Фокус" || reqType === "Продажа Trade-In") {
                       let isTradeIn = reqType === "Продажа Trade-In";
@@ -250,15 +239,10 @@ async function callBackend(actionName, payloadData = {}) {
                       let pts = isTradeIn ? 1 : (parseFloat(metaObj.pts) || 0);
                       
                       await supabaseClient.from('user_details').insert([{
-                          iin: req.author_iin,
-                          type: reqType,
-                          category: earnSourceType,
-                          action_text: req.details,
-                          points_motivation: pts,
-                          kpi_change: 3
+                          iin: req.author_iin, type: reqType, category: earnSourceType, action_text: req.details,
+                          points_motivation: pts, kpi_change: 3
                       }]);
-                      newStatus = "approved";
-                      isHandled = true; responseMsg = "Одобрено";
+                      newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
                   }
                   else if (reqType.includes("Баллы мотивации")) {
                       let cost = -1;
@@ -268,17 +252,12 @@ async function callBackend(actionName, payloadData = {}) {
                       else if (req.details.includes("3 часа")) cost = -3;
                       
                       await supabaseClient.from('user_details').insert([{
-                          iin: req.author_iin,
-                          type: "Использование",
-                          category: "Мотивация",
-                          action_text: req.details,
-                          points_motivation: cost
+                          iin: req.author_iin, type: "Использование", category: "Мотивация", action_text: req.details, points_motivation: cost
                       }]);
-                      newStatus = "approved";
-                      isHandled = true; responseMsg = "Одобрено";
+                      newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
                   }
                   else {
-                      // ФОЛБЭК: Ловит Обмен сменами, Исправления и всё остальное
+                      // ФОЛБЭК: УНИВЕРСАЛЬНОЕ ПОДТВЕРЖДЕНИЕ ДЛЯ ВСЕХ ОСТАЛЬНЫХ (Обмен сменами, исправление и т.д.)
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
@@ -289,15 +268,14 @@ async function callBackend(actionName, payloadData = {}) {
       if (isHandled) {
           // Обновляем саму заявку в Supabase
           const { error: updateErr } = await supabaseClient.from('requests').update({
-              status: newStatus,
-              details: newDetails,
-              metadata: metaObj
+              status: newStatus, details: newDetails, metadata: metaObj
           }).eq('id', reqId);
           
-          if (updateErr) return { success: false, error: updateErr.message };
+          if (updateErr) return { success: false, error: updateErr.message }; // Если бы ругалась база, мы бы увидели это тут
           return { success: true, msg: responseMsg };
       } else {
-          return { success: false, error: "Нет прав для этого действия" };
+          // Я изменил текст ошибки, чтобы если вдруг мы снова сюда попадем, было понятно почему
+          return { success: false, error: `Система не опознала статус или тип запроса (${reqType} / ${currentStatus})` };
       }
     }
 
