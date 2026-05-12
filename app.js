@@ -146,7 +146,8 @@ async function callBackend(actionName, payloadData = {}) {
       
       if (reqErr || !req) return { success: false, error: "Запрос не найден" };
       
-      let currentStatus = req.status;
+      let currentStatus = String(req.status || "").trim();
+      let reqType = String(req.type || "").trim();
       let newStatus = currentStatus;
       let newDetails = req.details;
       let metaObj = {};
@@ -201,21 +202,18 @@ async function callBackend(actionName, payloadData = {}) {
           
           if (isDir) {
               if (reqAction === "reject_admin") {
-                  newStatus = req.type === "Запрос на штраф" ? "rejected_notify_zav" : "rejected_notify_user";
+                  newStatus = reqType === "Запрос на штраф" ? "rejected_notify_zav" : "rejected_notify_user";
                   newDetails = req.details + "\n[" + currentUser.full_name + "]";
                   isHandled = true; responseMsg = "Запрос отклонен";
               }
-              // --- В. ДЕЙСТВИЯ АДМИНА ---
-              else if (currentStatus === "pending_admin_view" && reqAction === "viewed") {
+              else if ((currentStatus === "pending_admin_view" || currentStatus === "pending") && reqAction === "viewed") {
                   newStatus = "viewed";
                   isHandled = true; responseMsg = "Просмотрено";
               }
-              // ЗАМЕНИТЬ ВОТ ЭТУ СТРОКУ НИЖЕ:
               else if ((currentStatus === "pending_admin" || currentStatus === "pending") && reqAction === "approve_admin") {
                   newDetails = req.details + "\n[" + currentUser.full_name + "]";
                   
-                  if (req.type === "Запрос на штраф") {
-                      // 1. Записываем штраф в таблицу деталей (Триггер сам отправит ТГ!)
+                  if (reqType === "Запрос на штраф") {
                       await supabaseClient.from('user_details').insert([{
                           iin: req.target_iin,
                           type: "Штраф",
@@ -224,8 +222,6 @@ async function callBackend(actionName, payloadData = {}) {
                           fine_money: -(Math.abs(parseFloat(metaObj.moneyAmount) || 0)),
                           manager_iin: req.author_iin
                       }]);
-                      
-                      // 2. Создаем уведомление для нарушителя во Входящие
                       await supabaseClient.from('requests').insert([{
                           author_iin: req.author_iin,
                           type: "Уведомление о штрафе",
@@ -234,11 +230,10 @@ async function callBackend(actionName, payloadData = {}) {
                           status: "notify_user_fine",
                           metadata: metaObj
                       }]);
-                      
                       newStatus = "approved_notify_zav";
                       isHandled = true; responseMsg = "Штраф одобрен";
                   }
-                  else if (req.type === "Горячий чек") {
+                  else if (reqType === "Горячий чек") {
                       await supabaseClient.from('user_details').insert([{
                           iin: req.author_iin,
                           type: "Горячий чек",
@@ -249,23 +244,23 @@ async function callBackend(actionName, payloadData = {}) {
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
-                  else if (req.type === "Продажа СЦ/Фокус" || req.type === "Продажа Trade-In") {
-                      let isTradeIn = req.type === "Продажа Trade-In";
-                      let earnSourceType = isTradeIn ? "Trade-In" : (metaObj.type || req.type);
+                  else if (reqType === "Продажа СЦ/Фокус" || reqType === "Продажа Trade-In") {
+                      let isTradeIn = reqType === "Продажа Trade-In";
+                      let earnSourceType = isTradeIn ? "Trade-In" : (metaObj.type || reqType);
                       let pts = isTradeIn ? 1 : (parseFloat(metaObj.pts) || 0);
                       
                       await supabaseClient.from('user_details').insert([{
                           iin: req.author_iin,
-                          type: req.type,
+                          type: reqType,
                           category: earnSourceType,
                           action_text: req.details,
                           points_motivation: pts,
-                          kpi_change: 3 // kpiCfg.sc и tradein
+                          kpi_change: 3
                       }]);
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
-                  else if (req.type === "Баллы мотивации") {
+                  else if (reqType.includes("Баллы мотивации")) {
                       let cost = -1;
                       if (req.details.includes("30 мин")) cost = -0.5;
                       else if (req.details.includes("1 час")) cost = -1;
@@ -282,7 +277,8 @@ async function callBackend(actionName, payloadData = {}) {
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
-                  else if (req.type === "Исправление смены" || req.type === "Обмен сменами") {
+                  else {
+                      // ФОЛБЭК: Ловит Обмен сменами, Исправления и всё остальное
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
@@ -304,7 +300,6 @@ async function callBackend(actionName, payloadData = {}) {
           return { success: false, error: "Нет прав для этого действия" };
       }
     }
-
 
     // ========================================================
     // 2. ОТПРАВКА ЗАМЕЧАНИЯ
