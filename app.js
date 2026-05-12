@@ -205,11 +205,13 @@ async function callBackend(actionName, payloadData = {}) {
                   newDetails = req.details + "\n[" + currentUser.full_name + "]";
                   isHandled = true; responseMsg = "Запрос отклонен";
               }
+              // --- В. ДЕЙСТВИЯ АДМИНА ---
               else if (currentStatus === "pending_admin_view" && reqAction === "viewed") {
                   newStatus = "viewed";
                   isHandled = true; responseMsg = "Просмотрено";
               }
-              else if (currentStatus === "pending_admin" && reqAction === "approve_admin") {
+              // ЗАМЕНИТЬ ВОТ ЭТУ СТРОКУ НИЖЕ:
+              else if ((currentStatus === "pending_admin" || currentStatus === "pending") && reqAction === "approve_admin") {
                   newDetails = req.details + "\n[" + currentUser.full_name + "]";
                   
                   if (req.type === "Запрос на штраф") {
@@ -503,13 +505,18 @@ async function callBackend(actionName, payloadData = {}) {
     // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
     if (actionName === "submitRequest") {
       const { type, details, targetIin, metadata } = payloadData;
+      
+      // ВОТ ЗДЕСЬ ПРАВИЛЬНО РАСПРЕДЕЛЯЕМ СТАТУСЫ
+      let finalStatus = "pending_admin";
+      if (type === "Обмен сменами") finalStatus = "pending_user";
+
       const { error } = await supabaseClient.from('requests').insert([{ 
           author_iin: appState.iin, 
           type: type, 
           details: details, 
           target_iin: targetIin, 
           metadata: metadata ? JSON.parse(metadata) : {}, 
-          status: 'pending' 
+          status: finalStatus 
       }]);
       if (error) return { success: false, error: error.message };
       return { success: true };
