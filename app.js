@@ -1105,32 +1105,42 @@ function renderDashboardData(data, isSilent = false) {
   let inboxList = document.getElementById("inbox-list");
   if(inboxList) {
       inboxList.innerHTML = uInbox.map(r => { 
-    let desc = formatRemarkText(r.details || "");
-    let authorStr = r.type === "Замечание" ? formatRemarkAuthor(r.authorName, r.authorRole) : `<b>От:</b> ${r.authorName}`;
-    let d = r.date ? String(r.date) : "";
-    
-    if (r.status === "rejected_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title">❌ Штраф отклонен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> отклонен: <b>${formatShortName(r.approver) || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
-    
-    if (r.status === "approved_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #27ae60;"><div class="req-title">✅ Штраф одобрен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> одобрен: <b>${formatShortName(r.approver) || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
+          // Вырезаем ФИО из текста и достаем дату
+          let rawDesc = String(r.details || "");
+          let approverName = "";
+          let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+          
+          let match = rawDesc.match(/\n\[(.*?)\]$/);
+          if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
+          if (metaObj.approver) approverName = formatShortName(metaObj.approver);
+          
+          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+          
+          let desc = formatRemarkText(rawDesc);
+          let authorStr = r.type === "Замечание" ? formatRemarkAuthor(r.authorName, r.authorRole) : `<b>От:</b> ${r.authorName}`;
+          let d = r.date ? String(r.date) : "";
+          
+          if (r.status === "rejected_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title">❌ Штраф отклонен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> отклонен: <b>${approverName || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
+          if (r.status === "approved_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #27ae60;"><div class="req-title">✅ Штраф одобрен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> одобрен: <b>${approverName || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
 
-    if (r.type === "Замечание" && (r.status === "pending_user_reply" || r.status === "pending_admin_view_remark")) { 
-        if (r.targetIin === appState.iin && r.status === "pending_user_reply") {
-            return `<div class="req-item" id="req-${r.id}" style="border-left-color: #f39c12;"><div class="req-title" style="color:#f39c12;">⚠️ Замечание <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc" style="color:var(--text-color); font-size:13px;"><b style="color:#f39c12;">${authorStr}</b><br>${desc}</div><textarea id="remark-reply-${r.id}" placeholder="Ваша обратная связь..." style="box-sizing: border-box; width:100%; height:60px; margin-bottom:8px; border-radius:8px; padding:8px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-family:inherit; resize:none;"></textarea><button class="btn-orange" onclick="processReq('${r.id}', 'reply_remark', document.getElementById('remark-reply-${r.id}').value)">Ответить</button></div>`; 
-        } else {
-            return `<div class="req-item" id="req-${r.id}" style="border-left-color: #f39c12;"><div class="req-title" style="color:#f39c12;">⚠️ Замечание <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc" style="color:var(--text-color); font-size:13px;"><b style="color:#f39c12;">${authorStr}</b><br><b>${r.targetName}</b> — ${desc}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Просмотрено</button></div></div>`;
-        }
-    }
-    
-    if (r.status === "rejected_notify_user") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title">❌ Запрос отклонен</div><div class="req-desc">Ваш запрос на <b>${r.type || 'запрос'}</b> был отклонен.<br>Детали: ${desc}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_rejection')">Ознакомлен</button></div></div>`; 
-    
-    if (r.status === "notify_user_fine") {
-        let metaObj = {}; try { metaObj = JSON.parse(r.meta || "{}"); } catch(e){}
-        let authorDetails = formatRemarkAuthor(r.authorName, r.authorRole);
-        return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title" style="color: #e74c3c;">⚠️ Вам выписан штраф <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc"><b style="color:#e74c3c;">${authorDetails}</b><br><b>Причина:</b> ${desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount || 0}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount || 0} ₸</b></div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
-    }
+          if (r.type === "Замечание" && (r.status === "pending_user_reply" || r.status === "pending_admin_view_remark")) { 
+              if (r.targetIin === appState.iin && r.status === "pending_user_reply") {
+                  return `<div class="req-item" id="req-${r.id}" style="border-left-color: #f39c12;"><div class="req-title" style="color:#f39c12;">⚠️ Замечание <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc" style="color:var(--text-color); font-size:13px;"><b style="color:#f39c12;">${authorStr}</b><br>${desc}${selDateHtml}</div><textarea id="remark-reply-${r.id}" placeholder="Ваша обратная связь..." style="box-sizing: border-box; width:100%; height:60px; margin-bottom:8px; border-radius:8px; padding:8px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-family:inherit; resize:none;"></textarea><button class="btn-orange" onclick="processReq('${r.id}', 'reply_remark', document.getElementById('remark-reply-${r.id}').value)">Ответить</button></div>`; 
+              } else {
+                  return `<div class="req-item" id="req-${r.id}" style="border-left-color: #f39c12;"><div class="req-title" style="color:#f39c12;">⚠️ Замечание <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc" style="color:var(--text-color); font-size:13px;"><b style="color:#f39c12;">${authorStr}</b><br><b>${r.targetName}</b> — ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Просмотрено</button></div></div>`;
+              }
+          }
+          
+          if (r.status === "rejected_notify_user") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title">❌ Запрос отклонен</div><div class="req-desc">Ваш запрос на <b>${r.type || 'запрос'}</b> был отклонен: <b>${approverName || 'Руководителем'}</b>.<br><b>Детали:</b> ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_rejection')">Ознакомлен</button></div></div>`; 
+          
+          if (r.status === "notify_user_fine") {
+              let authorDetails = formatRemarkAuthor(r.authorName, r.authorRole);
+              return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title" style="color: #e74c3c;">⚠️ Вам выписан штраф <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc"><b style="color:#e74c3c;">${authorDetails}</b><br><b>Причина:</b> ${desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount || 0}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount || 0} ₸</b>${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
+          }
 
-    return `<div class="req-item" id="req-${r.id}"><div class="req-title">Обмен сменами</div><div class="req-desc">${r.authorName || 'Коллега'} просит поменяться.<br><b>${desc}</b></div><div class="grid-btns"><button class="btn-red" onclick="processReq('${r.id}', 'reject_user')">Отклонить</button><button class="btn-green" onclick="processReq('${r.id}', 'approve_user')">Одобрить</button></div></div>`; 
-}).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Уведомлений нет</p>";
+          return `<div class="req-item" id="req-${r.id}"><div class="req-title">Обмен сменами</div><div class="req-desc">${r.authorName || 'Коллега'} просит поменяться.<br><b>${desc}</b>${selDateHtml}</div><div class="grid-btns"><button class="btn-red" onclick="processReq('${r.id}', 'reject_user')">Отклонить</button><button class="btn-green" onclick="processReq('${r.id}', 'approve_user')">Одобрить</button></div></div>`; 
+      }).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Уведомлений нет</p>";
+  }
 
       Object.keys(savedReplies).forEach(id => { let ta = document.getElementById(id); if (ta) ta.value = savedReplies[id]; });
 
@@ -1149,48 +1159,68 @@ function renderDashboardData(data, isSilent = false) {
                   else if (r.status.includes("rejected")) stText = "Отклонен";
               }
 
-              let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${r.details || ''}` : (r.details || ''); 
+              // Вырезаем ФИО и достаем дату
+              let rawDesc = String(r.details || "");
+              let approverName = "";
+              let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+              
+              let match = rawDesc.match(/\n\[(.*?)\]$/);
+              if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
+              if (metaObj.approver) approverName = formatShortName(metaObj.approver);
+              if (!approverName && r.approver) approverName = formatShortName(r.approver);
+              
+              let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+
+              let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
               desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
-              let finalDescHtml = r.type === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Суть:</b> ${desc}`;
+              
+              let finalDescHtml = r.type === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Детали:</b> ${desc}${selDateHtml}`;
               let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.authorName || ''}`;
 
               if (r.type === "Уведомление о штрафе") {
                   stColor = "#e74c3c"; 
                   stText = "Ознакомлен";
-                  let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata); } catch(e){}
                   desc = `<b>Причина:</b> ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
                   authorStr = `<b style="color:#e74c3c;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>`; 
-                  finalDescHtml = desc; 
+                  finalDescHtml = desc + selDateHtml; 
                   r.type = "Штраф"; 
               } 
               else if (r.type === "Запрос на штраф") { 
-                  let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata); } catch(e){} 
                   desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`; 
-                  finalDescHtml = `<b>Суть:</b> ${desc}`;
+                  finalDescHtml = `<b>Детали:</b> ${desc}${selDateHtml}`;
               }
+              
+              let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
 
               return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-    <div class="req-title" style="color:var(--btn-color);">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
-    <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-            <b style="color:${stColor}">Статус: ${stText}</b>
-        </div>
-    </div>
-</div>`; 
+                  <div class="req-title" style="color:var(--btn-color);">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+                  <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
+                      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                          <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
+                      </div>
+                  </div>
+              </div>`; 
           });
       }
-  }
   
   let aInbox = data.adminInbox ? data.adminInbox.filter(r => r && r.id && !processedReqIds.has(String(r.id))) : []; 
   let adminList = document.getElementById("admin-list");
   if(adminList) {
       adminList.innerHTML = aInbox.map(r => { 
           let btns = `<div class="grid-btns"><button class="btn-red" onclick="processReq('${r.id}', 'reject_admin')">Отклонить</button><button class="btn-green" onclick="processReq('${r.id}', 'approve_admin')">Подтвердить</button></div>`; 
-          let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${r.details || ''}` : (r.details || ''); 
+          
+          let rawDesc = String(r.details || "");
+          let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+          
+          let match = rawDesc.match(/\n\[(.*?)\]$/);
+          if (match) rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim();
+          
+          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+
+          let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
           desc = formatRemarkText(desc);
           
           if (r.type === "Запрос на штраф") {
-              let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata); } catch(e){}
               desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
           }
           
@@ -1200,7 +1230,7 @@ function renderDashboardData(data, isSilent = false) {
           }
 
           let authorStr = r.type === "Замечание" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
-          let finalDescHtml = r.type === "Замечание" ? desc : `<b>Суть:</b> ${desc}`;
+          let finalDescHtml = r.type === "Замечание" ? desc + selDateHtml : `<b>Детали:</b> ${desc}${selDateHtml}`;
 
           return `<div class="req-item admin" id="req-${r.id}"><div class="req-title">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
       }).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Новых запросов нет</p>";
@@ -1472,15 +1502,26 @@ function renderAdminHistory(filterType) {
         else if (r.status.includes("rejected")) stText = "Отклонен";
     }
     
-    let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${r.details || ''}` : (r.details || ''); 
+    // Вырезаем ФИО и достаем дату
+    let rawDesc = String(r.details || "");
+    let approverName = "";
+    let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+    
+    let match = rawDesc.match(/\n\[(.*?)\]$/);
+    if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
+    if (metaObj.approver) approverName = formatShortName(metaObj.approver);
+    if (!approverName && r.approver) approverName = formatShortName(r.approver);
+    
+    let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+
+    let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
     desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
 
     if (r.type === "Запрос на штраф") {
-        let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata); } catch(e){}
         desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
     }
 
-    let approverLabel = r.approver ? `<span style="color:gray; font-size:10px; font-weight:normal;">${formatShortName(r.approver)}</span>` : ''; 
+    let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : ''; 
     let titleColor = getSourceColor(r.type); 
     if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c'; 
     
@@ -1488,13 +1529,13 @@ function renderAdminHistory(filterType) {
 
     return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
         <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
-        <div class="req-desc" style="color:var(--text-color);">${authorStr}<br><b>Суть:</b> ${desc}<br>
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-            <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
-        </div></div>
-    </div>`;
+        <div class="req-desc" style="color:var(--text-color);">${authorStr}<br><b>Детали:</b> ${desc}${selDateHtml}<br>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
+            </div>
+        </div>
+    </div>`; 
   });
-}
 
 function renderAdminOuts() {
   let list = globalActiveOuts || []; const now = Date.now();
