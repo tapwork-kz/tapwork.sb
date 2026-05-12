@@ -499,7 +499,6 @@ async function callBackend(actionName, payloadData = {}) {
         adminInbox: adminInbox,       // Теперь админ получит заявки!
         adminHistory: adminHistory    // И свою историю тоже
       };
-    }
     
     // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
     if (actionName === "submitRequest") {
@@ -587,22 +586,27 @@ function groupAndRenderByMonth(itemsArray, renderItemFn) {
 document.addEventListener("DOMContentLoaded", async () => {
   try {
       requestNotificationPermission(); initAutoScroll(); initSmartDates(); initSwipe(); 
-      const urlParams = new URLSearchParams(window.location.search); const urlIin = urlParams.get('iin');
+      const urlParams = new URLSearchParams(window.location.search); 
+      const urlIin = urlParams.get('iin');
       
-      if (urlIin && urlIin.length === 12) { 
-          document.getElementById("iin-input").value = urlIin; 
-          await manualLogin(); 
-      } 
-      else if (appState.iin && appState.token) { 
+      // 1. Если пользователь уже авторизован (есть токен в памяти)
+      if (appState.iin && appState.token) { 
           document.getElementById("auth-screen").classList.add("hidden"); 
           document.getElementById("main-screen").classList.remove("hidden"); 
           if (appState.firstName) document.getElementById("user-greeting").innerText = appState.firstName; 
           await loadDashboard(false); 
-          startPolling(); // <--- Вот здесь мы запускаем слушатель, который описан ниже
+          startPolling(); 
       } 
+      // 2. Если не авторизован (или пришел по ссылке из ТГ в первый раз)
       else { 
-          hideLoader(); 
+          hideLoader(); // Обязательно скрываем лоадер!
           document.getElementById("auth-screen").classList.remove("hidden"); 
+          
+          if (urlIin && urlIin.length === 12) { 
+              document.getElementById("iin-input").value = urlIin; 
+              // Ставим курсор в поле пароля, чтобы юзеру осталось только ввести его
+              setTimeout(() => document.getElementById("password-input").focus(), 300);
+          }
       }
   } catch (err) {
       console.error("Критическая ошибка при старте:", err);
