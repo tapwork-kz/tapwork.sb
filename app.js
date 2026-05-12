@@ -1536,6 +1536,7 @@ function renderAdminHistory(filterType) {
         </div>
     </div>`; 
   });
+}
 
 function renderAdminOuts() {
   let list = globalActiveOuts || []; const now = Date.now();
