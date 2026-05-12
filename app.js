@@ -1077,7 +1077,7 @@ function renderDashboardData(data, isSilent = false) {
           if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
           if (metaObj.approver) approverName = formatShortName(metaObj.approver);
           
-          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата: <b>${metaObj.date}</b></span>` : "";
           
           let desc = formatRemarkText(rawDesc);
           let authorStr = r.type === "Замечание" ? formatRemarkAuthor(r.authorName, r.authorRole) : `<b>От:</b> ${r.authorName}`;
@@ -1152,9 +1152,13 @@ function renderDashboardData(data, isSilent = false) {
           }
           
           let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
+          
+          // ВОТ ЗДЕСЬ ВОЗВРАЩАЕМ УНИКАЛЬНЫЕ ЦВЕТА
+          let titleColor = getSourceColor(r.type);
+          if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c';
 
           return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-              <div class="req-title" style="color:var(--btn-color);">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+              <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
               <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
                       <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
@@ -1193,7 +1197,11 @@ function renderDashboardData(data, isSilent = false) {
           let authorStr = r.type === "Замечание" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
           let finalDescHtml = r.type === "Замечание" ? desc + selDateHtml : `<b>Детали:</b> ${desc}${selDateHtml}`;
 
-          return `<div class="req-item admin" id="req-${r.id}"><div class="req-title">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
+          // ДОБАВЛЯЕМ ЦВЕТ ДЛЯ ЗАГОЛОВКОВ АДМИНА
+          let titleColor = getSourceColor(r.type);
+          if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c';
+
+          return `<div class="req-item admin" id="req-${r.id}"><div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
       }).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Новых запросов нет</p>";
   }
 
@@ -1470,7 +1478,7 @@ function renderAdminHistory(filterType) {
     if (metaObj.approver) approverName = formatShortName(metaObj.approver);
     if (!approverName && r.approver) approverName = formatShortName(r.approver);
     
-    let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+    let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата: <b>${metaObj.date}</b></span>` : "";
 
     let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
     desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
