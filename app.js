@@ -134,6 +134,247 @@ async function callBackend(actionName, payloadData = {}) {
       };
     }
 
+    // ========================================================
+    // 1. ОБРАБОТКА ЗАПРОСОВ (ОДОБРЕНИЕ / ОТКЛОНЕНИЕ / ОТВЕТЫ)
+    // ========================================================
+    if (actionName === "processRequest") {
+      const { reqId, reqAction, replyText } = payloadData;
+      
+      // Получаем сам запрос и данные пользователя, который нажал кнопку
+      const { data: req, error: reqErr } = await supabaseClient.from('requests').select('*').eq('id', reqId).single();
+      const { data: currentUser } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+      
+      if (reqErr || !req) return { success: false, error: "Запрос не найден" };
+      
+      let currentStatus = req.status;
+      let newStatus = currentStatus;
+      let newDetails = req.details;
+      let metaObj = {};
+      try { metaObj = typeof req.metadata === 'string' ? JSON.parse(req.metadata) : (req.metadata || {}); } catch(e){}
+
+      let isHandled = false;
+      let responseMsg = "Обработано";
+
+      // --- А. ОЗНАКОМЛЕНИЕ И СКРЫТИЕ ---
+      if ((currentStatus === "rejected_notify_zav" || currentStatus === "approved_notify_zav") && reqAction === "dismiss_notification") {
+          newStatus = currentStatus.includes("rejected") ? "rejected" : "approved";
+          isHandled = true; responseMsg = "Ознакомлен";
+      }
+      else if (currentStatus === "notify_user_fine" && reqAction === "dismiss_notification") {
+          newStatus = "viewed_fine";
+          isHandled = true; responseMsg = "Ознакомлен";
+      }
+      else if ((currentStatus === "pending_user_reply" || currentStatus === "pending_admin_view_remark") && reqAction === "dismiss_notification") {
+          if (!metaObj.dismissedBy) metaObj.dismissedBy = [];
+          if (!metaObj.dismissedBy.includes(appState.iin)) metaObj.dismissedBy.push(appState.iin);
+          isHandled = true; responseMsg = "Перенесено в историю";
+      }
+      
+      // --- Б. ДЕЙСТВИЯ ПРОДАВЦА (Обмен сменами / Ответ на замечание) ---
+      else if (currentStatus === "pending_user" && reqAction === "approve_user") {
+          newStatus = "pending_admin";
+          isHandled = true; responseMsg = "Отправлено директору";
+      }
+      else if (currentStatus === "pending_user" && reqAction === "reject_user") {
+          newStatus = "rejected_by_user";
+          isHandled = true; responseMsg = "Запрос отклонен";
+      }
+      else if (currentStatus === "rejected_notify_user" && reqAction === "dismiss_rejection") {
+          newStatus = "rejected";
+          isHandled = true; responseMsg = "Скрыто";
+      }
+      else if (currentStatus === "pending_user_reply" && reqAction === "reply_remark") {
+          let safeReply = replyText ? replyText.substring(0, 500) : "Без комментариев";
+          let targetShort = currentUser.full_name;
+          let parts = String(targetShort).trim().split(/\s+/); 
+          if(parts.length > 1) targetShort = parts[0] + " " + parts[1].charAt(0).toUpperCase() + ".";
+          
+          newDetails = req.details + `\n\n> ${targetShort}\n${safeReply}`;
+          newStatus = "pending_admin_view_remark";
+          isHandled = true; responseMsg = "Ответ отправлен";
+      }
+      
+      // --- В. ДЕЙСТВИЯ АДМИНА ---
+      else {
+          let roleStr = String(currentUser.role).toLowerCase(); 
+          let isDir = roleStr.includes("директор") || roleStr.includes("управляющий") || roleStr.includes("админ") || roleStr.includes("супервайзер");
+          
+          if (isDir) {
+              if (reqAction === "reject_admin") {
+                  newStatus = req.type === "Запрос на штраф" ? "rejected_notify_zav" : "rejected_notify_user";
+                  newDetails = req.details + "\n[" + currentUser.full_name + "]";
+                  isHandled = true; responseMsg = "Запрос отклонен";
+              }
+              else if (currentStatus === "pending_admin_view" && reqAction === "viewed") {
+                  newStatus = "viewed";
+                  isHandled = true; responseMsg = "Просмотрено";
+              }
+              else if (currentStatus === "pending_admin" && reqAction === "approve_admin") {
+                  newDetails = req.details + "\n[" + currentUser.full_name + "]";
+                  
+                  if (req.type === "Запрос на штраф") {
+                      // 1. Записываем штраф в таблицу деталей (Триггер сам отправит ТГ!)
+                      await supabaseClient.from('user_details').insert([{
+                          iin: req.target_iin,
+                          type: "Штраф",
+                          action_text: metaObj.reason || req.details,
+                          points_motivation: -(Math.abs(parseFloat(metaObj.amount) || 0)),
+                          fine_money: -(Math.abs(parseFloat(metaObj.moneyAmount) || 0)),
+                          manager_iin: req.author_iin
+                      }]);
+                      
+                      // 2. Создаем уведомление для нарушителя во Входящие
+                      await supabaseClient.from('requests').insert([{
+                          author_iin: req.author_iin,
+                          type: "Уведомление о штрафе",
+                          details: metaObj.reason || req.details,
+                          target_iin: req.target_iin,
+                          status: "notify_user_fine",
+                          metadata: metaObj
+                      }]);
+                      
+                      newStatus = "approved_notify_zav";
+                      isHandled = true; responseMsg = "Штраф одобрен";
+                  }
+                  else if (req.type === "Горячий чек") {
+                      await supabaseClient.from('user_details').insert([{
+                          iin: req.author_iin,
+                          type: "Горячий чек",
+                          action_text: req.details,
+                          points_motivation: parseFloat(metaObj.pts) || 0,
+                          kpi_change: parseFloat(metaObj.bonus) || 0
+                      }]);
+                      newStatus = "approved";
+                      isHandled = true; responseMsg = "Одобрено";
+                  }
+                  else if (req.type === "Продажа СЦ/Фокус" || req.type === "Продажа Trade-In") {
+                      let isTradeIn = req.type === "Продажа Trade-In";
+                      let earnSourceType = isTradeIn ? "Trade-In" : (metaObj.type || req.type);
+                      let pts = isTradeIn ? 1 : (parseFloat(metaObj.pts) || 0);
+                      
+                      await supabaseClient.from('user_details').insert([{
+                          iin: req.author_iin,
+                          type: req.type,
+                          category: earnSourceType,
+                          action_text: req.details,
+                          points_motivation: pts,
+                          kpi_change: 3 // kpiCfg.sc и tradein
+                      }]);
+                      newStatus = "approved";
+                      isHandled = true; responseMsg = "Одобрено";
+                  }
+                  else if (req.type === "Баллы мотивации") {
+                      let cost = -1;
+                      if (req.details.includes("30 мин")) cost = -0.5;
+                      else if (req.details.includes("1 час")) cost = -1;
+                      else if (req.details.includes("2 часа")) cost = -2;
+                      else if (req.details.includes("3 часа")) cost = -3;
+                      
+                      await supabaseClient.from('user_details').insert([{
+                          iin: req.author_iin,
+                          type: "Использование",
+                          category: "Мотивация",
+                          action_text: req.details,
+                          points_motivation: cost
+                      }]);
+                      newStatus = "approved";
+                      isHandled = true; responseMsg = "Одобрено";
+                  }
+                  else if (req.type === "Исправление смены" || req.type === "Обмен сменами") {
+                      newStatus = "approved";
+                      isHandled = true; responseMsg = "Одобрено";
+                  }
+              }
+          }
+      }
+
+      if (isHandled) {
+          // Обновляем саму заявку в Supabase
+          const { error: updateErr } = await supabaseClient.from('requests').update({
+              status: newStatus,
+              details: newDetails,
+              metadata: metaObj
+          }).eq('id', reqId);
+          
+          if (updateErr) return { success: false, error: updateErr.message };
+          return { success: true, msg: responseMsg };
+      } else {
+          return { success: false, error: "Нет прав для этого действия" };
+      }
+    }
+
+
+    // ========================================================
+    // 2. ОТПРАВКА ЗАМЕЧАНИЯ
+    // ========================================================
+    if (actionName === "submitRemark") {
+      const { targetIin, targetName, text } = payloadData;
+      
+      const { error } = await supabaseClient.from('requests').insert([{
+          author_iin: appState.iin,
+          type: "Замечание",
+          details: text,
+          target_iin: targetIin,
+          status: "pending_user_reply",
+          metadata: {}
+      }]);
+      // Триггер "Telegram Запросы" сработает сам!
+      if (error) return { success: false, error: error.message };
+      return { success: true };
+    }
+
+
+    // ========================================================
+    // 3. ВЫПИСКА / ЗАПРОС ШТРАФА
+    // ========================================================
+    if (actionName === "submitFine") {
+      const { iin: targetIin, name: targetName, reason, amount, moneyAmount } = payloadData;
+      const { data: currentUser } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+      
+      let roleStr = String(currentUser.role).toLowerCase(); 
+      let isDir = roleStr.includes("директор") || roleStr.includes("управляющий") || roleStr.includes("админ") || roleStr.includes("супервайзер"); 
+      let isZavSklad = roleStr.includes("заведующий складом");
+      
+      let metaObj = { reason: reason, amount: amount, moneyAmount: moneyAmount };
+      let ptsAmount = -(Math.abs(parseFloat(amount) || 0));
+      let fineMoneyAmount = -(Math.abs(parseFloat(moneyAmount) || 0));
+
+      if (isZavSklad) {
+          // Зав. складом отправляет на одобрение (попадает в requests)
+          const { error } = await supabaseClient.from('requests').insert([{
+              author_iin: appState.iin,
+              type: "Запрос на штраф",
+              details: reason,
+              target_iin: targetIin,
+              status: "pending_admin",
+              metadata: metaObj
+          }]);
+          if (error) return { success: false, error: error.message };
+      } 
+      else if (isDir) {
+          // Директор выписывает сразу в детали баллов (Триггер отправит ТГ!)
+          await supabaseClient.from('user_details').insert([{
+              iin: targetIin,
+              type: "Штраф",
+              action_text: reason,
+              points_motivation: ptsAmount,
+              fine_money: fineMoneyAmount,
+              manager_iin: appState.iin
+          }]);
+          
+          // Создаем заявку-уведомление для продавца
+          await supabaseClient.from('requests').insert([{
+              author_iin: appState.iin,
+              type: "Уведомление о штрафе",
+              details: reason,
+              target_iin: targetIin,
+              status: "notify_user_fine",
+              metadata: metaObj
+          }]);
+      }
+      return { success: true };
+    }
+
     // --- ГЛАВНАЯ ЗАГРУЗКА ДАННЫХ (ГИБРИД: Supabase + GAS) ---
     if (actionName === "getDashboardData") {
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
