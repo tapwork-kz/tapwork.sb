@@ -1487,13 +1487,12 @@ function renderAdminHistory(filterType) {
     let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
 
     return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-    <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
-    <div class="req-desc" style="color:var(--text-color);">${authorStr}<br><b>Суть:</b> ${desc}<br>
-    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-        <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
-    </div></div>
-</div>`;
-    </div>`; 
+        <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+        <div class="req-desc" style="color:var(--text-color);">${authorStr}<br><b>Суть:</b> ${desc}<br>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+            <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
+        </div></div>
+    </div>`;
   });
 }
 
