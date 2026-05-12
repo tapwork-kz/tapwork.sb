@@ -26,7 +26,7 @@ function safeIin(val) { if(val === undefined || val === null) return ""; return 
 function requestNotificationPermission() { if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") Notification.requestPermission(); }
 function showPushNotification(title, bodyText) { if ("Notification" in window && Notification.permission === "granted") new Notification(title, { body: bodyText, icon: "icon.png" }); }
 
-// Вспомогательная функция для форматирования плана (Добавлена!)
+// Вспомогательная функция для форматирования плана
 function formatPlanHtml(planArray) {
     if (!planArray || planArray.length === 0) return "<p style='color:gray; font-size:12px; text-align:center;'>План на сегодня не загружен</p>";
     let html = "<div class='card'>";
@@ -145,7 +145,6 @@ async function callBackend(actionName, payloadData = {}) {
       
       if (reqErr || !req) return { success: false, error: "Запрос не найден в базе данных" };
       
-      // Приводим к нижнему регистру для надежности
       let currentStatus = String(req.status || "").trim().toLowerCase();
       let reqType = String(req.type || "").trim();
       
@@ -157,12 +156,10 @@ async function callBackend(actionName, payloadData = {}) {
       let isHandled = false;
       let responseMsg = "Обработано";
 
-      // --- ЗАЩИТА ОТ ДВОЙНОГО КЛИКА / ИЗМЕНЕННОГО СТАТУСА ---
       if (["approved", "rejected", "rejected_by_user", "viewed"].includes(currentStatus) && !reqAction.includes("dismiss")) {
           return { success: false, error: `Эта заявка уже обработана (Текущий статус: ${currentStatus})` };
       }
 
-      // --- А. ОЗНАКОМЛЕНИЕ И СКРЫТИЕ ---
       if ((currentStatus === "rejected_notify_zav" || currentStatus === "approved_notify_zav") && reqAction === "dismiss_notification") {
           newStatus = currentStatus.includes("rejected") ? "rejected" : "approved";
           isHandled = true; responseMsg = "Ознакомлен";
@@ -176,8 +173,6 @@ async function callBackend(actionName, payloadData = {}) {
           if (!metaObj.dismissedBy.includes(appState.iin)) metaObj.dismissedBy.push(appState.iin);
           isHandled = true; responseMsg = "Перенесено в историю";
       }
-      
-      // --- Б. ДЕЙСТВИЯ ПРОДАВЦА ---
       else if (currentStatus === "pending_user" && reqAction === "approve_user") {
           newStatus = "pending_admin";
           isHandled = true; responseMsg = "Отправлено директору";
@@ -200,8 +195,6 @@ async function callBackend(actionName, payloadData = {}) {
           newStatus = "pending_admin_view_remark";
           isHandled = true; responseMsg = "Ответ отправлен";
       }
-      
-      // --- В. ДЕЙСТВИЯ АДМИНА ---
       else {
           let roleStr = String(currentUser.role).toLowerCase(); 
           let isDir = roleStr.includes("директор") || roleStr.includes("управляющий") || roleStr.includes("админ") || roleStr.includes("супервайзер");
@@ -269,7 +262,6 @@ async function callBackend(actionName, payloadData = {}) {
                       newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
                   }
                   else {
-                      // ФОЛБЭК
                       newStatus = "approved";
                       isHandled = true; responseMsg = "Одобрено";
                   }
@@ -278,7 +270,6 @@ async function callBackend(actionName, payloadData = {}) {
       }
 
       if (isHandled) {
-          // Обновляем саму заявку в Supabase
           const { error: updateErr } = await supabaseClient.from('requests').update({
               status: newStatus, details: newDetails, metadata: metaObj
           }).eq('id', reqId);
@@ -290,12 +281,8 @@ async function callBackend(actionName, payloadData = {}) {
       }
     }
 
-    // ========================================================
-    // 2. ОТПРАВКА ЗАМЕЧАНИЯ
-    // ========================================================
     if (actionName === "submitRemark") {
       const { targetIin, targetName, text } = payloadData;
-      
       const { error } = await supabaseClient.from('requests').insert([{
           author_iin: appState.iin,
           type: "Замечание",
@@ -308,9 +295,6 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true };
     }
 
-    // ========================================================
-    // 3. ВЫПИСКА / ЗАПРОС ШТРАФА
-    // ========================================================
     if (actionName === "submitFine") {
       const { iin: targetIin, name: targetName, reason, amount, moneyAmount } = payloadData;
       const { data: currentUser } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
@@ -343,34 +327,27 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true };
     }
 
-    // --- ГЛАВНАЯ ЗАГРУЗКА ДАННЫХ (ГИБРИД: Supabase + GAS) ---
     if (actionName === "getDashboardData") {
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       if (userErr || !userData) return { authorized: false };
 
-      // 2. Делаем запрос в Google Таблицы (GAS) за гибридными данными
       let gasData = {};
       try {
         const gasResponse = await fetch(GAS_URL, { 
             method: "POST", 
             headers: { "Content-Type": "text/plain;charset=utf-8" },
-            redirect: "follow", // <--- ДОБАВИТЬ ЭТУ СТРОЧКУ
+            redirect: "follow", 
             body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
         });
         gasData = await gasResponse.json();
-        // ВЫВОДИМ ОТВЕТ В КОНСОЛЬ
-        console.log("Ответ от Google Таблиц:", gasData);
       } catch (e) { 
         console.error("Ошибка связи с Google Таблицами:", e); 
       }
 
-      // 3. Добираем запросы и историю из Supabase
-      // Сначала получаем всех юзеров, чтобы подставлять красивые ФИО вместо ИИН
       const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
       let userMap = {};
       if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
 
-      // Скачиваем ВСЕ заявки
       const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
       
       let userInbox = [], userHistory = [], adminInbox = [], adminHistory = [];
@@ -382,11 +359,9 @@ async function callBackend(actionName, payloadData = {}) {
               let author = userMap[r.author_iin] || {};
               let target = userMap[r.target_iin] || {};
               
-              // Форматируем дату для фронтенда (dd.mm.yyyy hh:mm)
               let d = new Date(r.created_at);
               let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
               
-              // Собираем объект в том формате, который понимает renderDashboardData
               let reqObj = {
                   id: r.id,
                   date: dateStr,
@@ -398,7 +373,7 @@ async function callBackend(actionName, payloadData = {}) {
                   details: r.details,
                   targetIin: r.target_iin,
                   targetName: target.full_name || "",
-                  status: r.status === 'pending' ? 'pending_admin' : r.status, // подстраховка
+                  status: r.status === 'pending' ? 'pending_admin' : r.status,
                   meta: r.metadata ? JSON.stringify(r.metadata) : "{}"
               };
 
@@ -408,7 +383,6 @@ async function callBackend(actionName, payloadData = {}) {
                   if (m.dismissedBy && m.dismissedBy.includes(appState.iin)) isDismissedByMe = true; 
               } catch(e) {}
 
-              // === ЛОГИКА АДМИНА ===
               if (isDir) {
                   if (reqObj.status === "pending_admin" || reqObj.status === "pending_admin_view") adminInbox.push(reqObj);
                   if (reqObj.status === "pending_admin_view_remark" && !isDismissedByMe) adminInbox.push(reqObj);
@@ -419,7 +393,6 @@ async function callBackend(actionName, payloadData = {}) {
                   }
               }
 
-              // === ЛОГИКА ЗАВ. СКЛАДОМ ===
               if (isZavSklad) {
                   if ((reqObj.status === "rejected_notify_zav" || reqObj.status === "approved_notify_zav") && reqObj.authorIin === appState.iin) userInbox.push(reqObj);
                   else if (reqObj.status === "pending_user" && reqObj.targetIin === appState.iin) userInbox.push(reqObj);
@@ -433,7 +406,6 @@ async function callBackend(actionName, payloadData = {}) {
                   }
               }
               
-              // === ЛОГИКА ПРОДАВЦА ===
               if (!isDir && !isZavSklad) {
                   if (reqObj.status === "pending_user" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
                   else if (reqObj.status === "rejected_notify_user" && reqObj.authorIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
@@ -441,7 +413,6 @@ async function callBackend(actionName, payloadData = {}) {
                   else if (reqObj.status === "notify_user_fine" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
               }
 
-              // === ОБЩАЯ ИСТОРИЯ ===
               let isClosedForUser = ["approved", "rejected", "viewed", "rejected_by_user", "approved_notify_zav", "rejected_notify_zav", "rejected_notify_user", "viewed_fine"].includes(reqObj.status);
               if ((reqObj.authorIin === appState.iin || reqObj.targetIin === appState.iin) && (isClosedForUser || (reqObj.status === "pending_admin_view_remark" && reqObj.targetIin === appState.iin) || isDismissedByMe)) {
                   if (userHistory.length < 50) userHistory.push(reqObj);
@@ -449,7 +420,6 @@ async function callBackend(actionName, payloadData = {}) {
           });
       }
 
-      // 4. Склеиваем всё вместе для фронтенда
       return {
         authorized: true, 
         role: userData.role, 
@@ -464,15 +434,13 @@ async function callBackend(actionName, payloadData = {}) {
         
         userHistory: userHistory, 
         userInbox: userInbox,
-        adminInbox: adminInbox,       // Теперь админ получит заявки!
-        adminHistory: adminHistory    // И свою историю тоже
+        adminInbox: adminInbox,
+        adminHistory: adminHistory
       };
     }
-    // --- ОТПРАВКА ЗАПРОСОВ (Supabase) ---
+
     if (actionName === "submitRequest") {
       const { type, details, targetIin, metadata } = payloadData;
-      
-      // ВОТ ЗДЕСЬ ПРАВИЛЬНО РАСПРЕДЕЛЯЕМ СТАТУСЫ
       let finalStatus = "pending_admin";
       if (type === "Обмен сменами") finalStatus = "pending_user";
 
@@ -562,7 +530,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       const urlParams = new URLSearchParams(window.location.search); 
       const urlIin = urlParams.get('iin');
       
-      // 1. Если пользователь уже авторизован (есть токен в памяти)
       if (appState.iin && appState.token) { 
           document.getElementById("auth-screen").classList.add("hidden"); 
           document.getElementById("main-screen").classList.remove("hidden"); 
@@ -570,14 +537,12 @@ document.addEventListener("DOMContentLoaded", async () => {
           await loadDashboard(false); 
           startPolling(); 
       } 
-      // 2. Если не авторизован (или пришел по ссылке из ТГ в первый раз)
       else { 
-          hideLoader(); // Обязательно скрываем лоадер!
+          hideLoader();
           document.getElementById("auth-screen").classList.remove("hidden"); 
           
           if (urlIin && urlIin.length === 12) { 
               document.getElementById("iin-input").value = urlIin; 
-              // Ставим курсор в поле пароля, чтобы юзеру осталось только ввести его
               setTimeout(() => document.getElementById("password-input").focus(), 300);
           }
       }
@@ -651,7 +616,6 @@ function startPolling() {
              loadDashboard(true);
          }
       })
-      // ВОТ СЮДА НУЖНО БЫЛО ВСТАВИТЬ ОБНОВЛЕНИЕ ЛИМИТОВ
       .on('postgres_changes', { event: '*', schema: 'public', table: 'time_tracking' }, async payload => {
          let state = await callBackend('startupCheck', { token: appState.token, iin: appState.iin });
          if(state) {
@@ -659,7 +623,7 @@ function startPolling() {
              if (appState.role.toLowerCase().includes("директор") || appState.role.toLowerCase().includes("заведующий")) {
                  renderAdminOuts();
              } else {
-                 applyLimits(state); // <--- МГНОВЕННАЯ БЛОКИРОВКА КНОПОК
+                 applyLimits(state); 
              }
          }
       })
@@ -1105,7 +1069,6 @@ function renderDashboardData(data, isSilent = false) {
   let inboxList = document.getElementById("inbox-list");
   if(inboxList) {
       inboxList.innerHTML = uInbox.map(r => { 
-          // Вырезаем ФИО из текста и достаем дату
           let rawDesc = String(r.details || "");
           let approverName = "";
           let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
@@ -1142,66 +1105,64 @@ function renderDashboardData(data, isSilent = false) {
       }).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Уведомлений нет</p>";
   }
 
-      Object.keys(savedReplies).forEach(id => { let ta = document.getElementById(id); if (ta) ta.value = savedReplies[id]; });
+  Object.keys(savedReplies).forEach(id => { let ta = document.getElementById(id); if (ta) ta.value = savedReplies[id]; });
 
-      let uHistory = data.userHistory || [];
-      
-      uHistory = uHistory.filter(r => !(r.type === "Запрос на штраф" && r.targetIin === appState.iin));
+  let uHistory = data.userHistory || [];
+  uHistory = uHistory.filter(r => !(r.type === "Запрос на штраф" && r.targetIin === appState.iin));
 
-      let uHistList = document.getElementById("user-history-list");
-      if (uHistList) {
-          uHistList.innerHTML = groupAndRenderByMonth(uHistory, r => {
-              let stText = "Просмотрен"; let stColor = "#95a5a6";
-              if (r.status.includes("approved")) { stText = "Одобрен"; stColor = "#27ae60"; } else if (r.status.includes("rejected")) { stText = "Отклонен"; stColor = "#e74c3c"; }
-              
-              if (r.type === "Исправление смены") {
-                  if (r.status.includes("approved")) stText = "Исправлен";
-                  else if (r.status.includes("rejected")) stText = "Отклонен";
-              }
+  let uHistList = document.getElementById("user-history-list");
+  if (uHistList) {
+      uHistList.innerHTML = groupAndRenderByMonth(uHistory, r => {
+          let stText = "Просмотрен"; let stColor = "#95a5a6";
+          if (r.status.includes("approved")) { stText = "Одобрен"; stColor = "#27ae60"; } else if (r.status.includes("rejected")) { stText = "Отклонен"; stColor = "#e74c3c"; }
+          
+          if (r.type === "Исправление смены") {
+              if (r.status.includes("approved")) stText = "Исправлен";
+              else if (r.status.includes("rejected")) stText = "Отклонен";
+          }
 
-              // Вырезаем ФИО и достаем дату
-              let rawDesc = String(r.details || "");
-              let approverName = "";
-              let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
-              
-              let match = rawDesc.match(/\n\[(.*?)\]$/);
-              if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
-              if (metaObj.approver) approverName = formatShortName(metaObj.approver);
-              if (!approverName && r.approver) approverName = formatShortName(r.approver);
-              
-              let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
+          let rawDesc = String(r.details || "");
+          let approverName = "";
+          let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+          
+          let match = rawDesc.match(/\n\[(.*?)\]$/);
+          if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
+          if (metaObj.approver) approverName = formatShortName(metaObj.approver);
+          if (!approverName && r.approver) approverName = formatShortName(r.approver);
+          
+          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
 
-              let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
-              desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
-              
-              let finalDescHtml = r.type === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Детали:</b> ${desc}${selDateHtml}`;
-              let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.authorName || ''}`;
+          let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
+          desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
+          
+          let finalDescHtml = r.type === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Детали:</b> ${desc}${selDateHtml}`;
+          let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.authorName || ''}`;
 
-              if (r.type === "Уведомление о штрафе") {
-                  stColor = "#e74c3c"; 
-                  stText = "Ознакомлен";
-                  desc = `<b>Причина:</b> ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
-                  authorStr = `<b style="color:#e74c3c;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>`; 
-                  finalDescHtml = desc + selDateHtml; 
-                  r.type = "Штраф"; 
-              } 
-              else if (r.type === "Запрос на штраф") { 
-                  desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`; 
-                  finalDescHtml = `<b>Детали:</b> ${desc}${selDateHtml}`;
-              }
-              
-              let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
+          if (r.type === "Уведомление о штрафе") {
+              stColor = "#e74c3c"; 
+              stText = "Ознакомлен";
+              desc = `<b>Причина:</b> ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
+              authorStr = `<b style="color:#e74c3c;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>`; 
+              finalDescHtml = desc + selDateHtml; 
+              r.type = "Штраф"; 
+          } 
+          else if (r.type === "Запрос на штраф") { 
+              desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`; 
+              finalDescHtml = `<b>Детали:</b> ${desc}${selDateHtml}`;
+          }
+          
+          let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
 
-              return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-                  <div class="req-title" style="color:var(--btn-color);">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
-                  <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
-                      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-                          <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
-                      </div>
+          return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
+              <div class="req-title" style="color:var(--btn-color);">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+              <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
+                  <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                      <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
                   </div>
-              </div>`; 
-          });
-      }
+              </div>
+          </div>`; 
+      });
+  }
   
   let aInbox = data.adminInbox ? data.adminInbox.filter(r => r && r.id && !processedReqIds.has(String(r.id))) : []; 
   let adminList = document.getElementById("admin-list");
@@ -1290,10 +1251,8 @@ function renderHistoryItem(i, isCompact = false) {
     let inner = `<div style="flex:1;"><b style="font-size:12px; color:${typeColor}; display:inline-block; margin-bottom:3px;">${typeDisplay}</b><br><span style="color:var(--text-color); font-size:12px; display:inline-block; margin-bottom:3px;">${i.reason}</span><br><div style="display:flex; justify-content:space-between; align-items:center;"><div>${sourceHtml}</div>${approverHtml}</div></div><span class="${col}" style="margin-left:10px;">${valStr}</span>`; 
     
     if (isCompact) {
-        // Рендер карточкой (например, для вкладки "Мои баллы")
         return `<div class="req-item" style="border-left-color: ${typeColor}; border-left-width: 2px; padding: 8px 10px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">${inner}</div>`; 
     }
-    // Обычный рендер строкой
     return `<div class="detail-item">${inner}</div>`; 
 }
 
@@ -1502,7 +1461,6 @@ function renderAdminHistory(filterType) {
         else if (r.status.includes("rejected")) stText = "Отклонен";
     }
     
-    // Вырезаем ФИО и достаем дату
     let rawDesc = String(r.details || "");
     let approverName = "";
     let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
