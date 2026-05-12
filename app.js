@@ -327,27 +327,80 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true };
     }
 
-    if (actionName === "getDashboardData") {
-      const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
-      if (userErr || !userData) return { authorized: false };
-
-      let gasData = {};
-      try {
-        const gasResponse = await fetch(GAS_URL, { 
-            method: "POST", 
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            redirect: "follow", 
-            body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
-        });
-        gasData = await gasResponse.json();
-      } catch (e) { 
-        console.error("Ошибка связи с Google Таблицами:", e); 
-      }
-
+    // 3. Добираем запросы и историю из Supabase
       const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
       let userMap = {};
       if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
 
+      // --- ПОДГРУЗКА ОДОБРЕННЫХ KPI И БАЛЛОВ ---
+      const { data: allUserDetails } = await supabaseClient.from('user_details').select('*');
+      if (allUserDetails && gasData) {
+          let empMap = {};
+          if (gasData.adminEmployees) gasData.adminEmployees.forEach(e => empMap[e.iin] = e);
+          if (!gasData.info) gasData.info = { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, kpiDetails: [], reports: [], myPtsHistory: [] };
+
+          allUserDetails.forEach(row => {
+              let dStr = new Date(row.created_at);
+              let dateFormatted = ("0" + dStr.getDate()).slice(-2) + "." + ("0" + (dStr.getMonth() + 1)).slice(-2) + "." + dStr.getFullYear() + " " + ("0" + dStr.getHours()).slice(-2) + ":" + ("0" + dStr.getMinutes()).slice(-2);
+              let justDate = ("0" + dStr.getDate()).slice(-2) + "." + ("0" + (dStr.getMonth() + 1)).slice(-2) + "." + dStr.getFullYear();
+
+              // Интеграция для текущего юзера (для КФ. ЭФФ.)
+              if (row.iin === appState.iin) {
+                  let kpiVal = parseFloat(row.kpi_change) || 0;
+                  let ptsVal = parseFloat(row.points_motivation) || 0;
+                  let mnyVal = parseFloat(row.fine_money) || 0;
+
+                  if (kpiVal !== 0) {
+                      gasData.info.kpiValue = (gasData.info.kpiValue || 0) + kpiVal;
+                      if(!gasData.info.kpiDetails) gasData.info.kpiDetails = [];
+                      gasData.info.kpiDetails.push({ name: row.action_text, source: row.category || row.type, val: kpiVal, date: justDate });
+                  }
+                  
+                  if (ptsVal > 0) gasData.info.ptsAccrued = (gasData.info.ptsAccrued || 0) + ptsVal;
+                  if (ptsVal < 0 && row.type !== "Штраф") gasData.info.ptsUsed = (gasData.info.ptsUsed || 0) + Math.abs(ptsVal);
+                  if (row.type === "Штраф") gasData.info.ptsFine = (gasData.info.ptsFine || 0) + Math.abs(ptsVal);
+                  
+                  if (ptsVal !== 0 || mnyVal !== 0 || row.type === "Горячий чек" || row.type === "Продажа СЦ/Фокус") {
+                      if(!gasData.info.myPtsHistory) gasData.info.myPtsHistory = [];
+                      gasData.info.myPtsHistory.push({ type: row.type, reason: row.action_text, source: row.category || row.type, val: ptsVal, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
+                  }
+              }
+
+              // Интеграция для сотрудников (Админ панель)
+              if (empMap[row.iin]) {
+                  let e = empMap[row.iin];
+                  let kpiVal = parseFloat(row.kpi_change) || 0;
+                  let ptsVal = parseFloat(row.points_motivation) || 0;
+                  let mnyVal = parseFloat(row.fine_money) || 0;
+
+                  if (kpiVal !== 0) {
+                      e.kpi = (e.kpi || 0) + kpiVal;
+                      if(!e.kpiDetails) e.kpiDetails = [];
+                      e.kpiDetails.push({ name: row.action_text, source: row.category || row.type, val: kpiVal, date: justDate });
+                  }
+
+                  if(!e.pts) e.pts = {acc: 0, use: 0, rem: 0, fin: 0};
+                  if (ptsVal > 0) e.pts.acc += ptsVal;
+                  if (ptsVal < 0 && row.type !== "Штраф") e.pts.use += Math.abs(ptsVal);
+                  if (row.type === "Штраф") e.pts.fin += Math.abs(ptsVal);
+                  
+                  if (ptsVal !== 0 || mnyVal !== 0 || row.type === "Горячий чек" || row.type === "Продажа СЦ/Фокус") {
+                      if(!e.ptsHistory) e.ptsHistory = [];
+                      e.ptsHistory.push({ type: row.type, reason: row.action_text, source: row.category || row.type, val: ptsVal, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
+                  }
+              }
+          });
+
+          // Пересчет остатков
+          if(gasData.info) gasData.info.ptsLeft = (gasData.info.ptsAccrued || 0) - (gasData.info.ptsUsed || 0) - (gasData.info.ptsFine || 0);
+          if(gasData.adminEmployees) {
+              gasData.adminEmployees.forEach(e => {
+                  if(e.pts) e.pts.rem = (e.pts.acc || 0) - (e.pts.use || 0) - (e.pts.fin || 0);
+              });
+          }
+      }
+
+      // Скачиваем ВСЕ заявки
       const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
       
       let userInbox = [], userHistory = [], adminInbox = [], adminHistory = [];
@@ -420,6 +473,7 @@ async function callBackend(actionName, payloadData = {}) {
           });
       }
 
+      // 4. Склеиваем всё вместе для фронтенда (ДОБАВЛЕНЫ МАССИВЫ АДМИНКИ)
       return {
         authorized: true, 
         role: userData.role, 
@@ -431,6 +485,11 @@ async function callBackend(actionName, payloadData = {}) {
         adminPlan: gasData.adminPlan || formatPlanHtml([]), 
         tradeInModels: gasData.tradeInModels || [], 
         info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
+        
+        adminEmployees: gasData.adminEmployees || [],
+        adminScItems: gasData.adminScItems || [],
+        sellers: gasData.sellers || [],
+        hotChecks: gasData.hotChecks || [],
         
         userHistory: userHistory, 
         userInbox: userInbox,
@@ -1124,6 +1183,10 @@ function renderDashboardData(data, isSilent = false) {
           let rawDesc = String(r.details || "");
           let approverName = "";
           let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+
+          // РАЗДЕЛЯЕМ СЦ И ФОКУС
+          let displayTitle = r.type || 'Запрос';
+          if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
           
           let match = rawDesc.match(/\n\[(.*?)\]$/);
           if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
@@ -1144,7 +1207,7 @@ function renderDashboardData(data, isSilent = false) {
               desc = `<b>Причина:</b> ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
               authorStr = `<b style="color:#e74c3c;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>`; 
               finalDescHtml = desc + selDateHtml; 
-              r.type = "Штраф"; 
+              displayTitle = "Штраф"; 
           } 
           else if (r.type === "Запрос на штраф") { 
               desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`; 
@@ -1153,12 +1216,11 @@ function renderDashboardData(data, isSilent = false) {
           
           let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
           
-          // ВОТ ЗДЕСЬ ВОЗВРАЩАЕМ УНИКАЛЬНЫЕ ЦВЕТА
-          let titleColor = getSourceColor(r.type);
-          if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c';
+          // ВОЗВРАЩАЕМ УНИКАЛЬНЫЕ ЦВЕТА
+          let titleColor = getSourceColor(displayTitle);
 
           return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-              <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+              <div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
               <div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}<br>
                   <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
                       <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
@@ -1176,6 +1238,10 @@ function renderDashboardData(data, isSilent = false) {
           
           let rawDesc = String(r.details || "");
           let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+
+          // РАЗДЕЛЯЕМ СЦ И ФОКУС
+          let displayTitle = r.type || 'Запрос';
+          if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
           
           let match = rawDesc.match(/\n\[(.*?)\]$/);
           if (match) rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim();
@@ -1197,11 +1263,10 @@ function renderDashboardData(data, isSilent = false) {
           let authorStr = r.type === "Замечание" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
           let finalDescHtml = r.type === "Замечание" ? desc + selDateHtml : `<b>Детали:</b> ${desc}${selDateHtml}`;
 
-          // ДОБАВЛЯЕМ ЦВЕТ ДЛЯ ЗАГОЛОВКОВ АДМИНА
-          let titleColor = getSourceColor(r.type);
-          if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c';
+          // ЦВЕТА
+          let titleColor = getSourceColor(displayTitle);
 
-          return `<div class="req-item admin" id="req-${r.id}"><div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
+          return `<div class="req-item admin" id="req-${r.id}"><div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
       }).join("") || "<p style='color:gray;text-align:center;font-size:13px;'>Новых запросов нет</p>";
   }
 
@@ -1472,13 +1537,17 @@ function renderAdminHistory(filterType) {
     let rawDesc = String(r.details || "");
     let approverName = "";
     let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
+
+    // РАЗДЕЛЯЕМ СЦ И ФОКУС
+    let displayTitle = r.type || 'Запрос';
+    if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
     
     let match = rawDesc.match(/\n\[(.*?)\]$/);
     if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
     if (metaObj.approver) approverName = formatShortName(metaObj.approver);
     if (!approverName && r.approver) approverName = formatShortName(r.approver);
     
-    let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата: <b>${metaObj.date}</b></span>` : "";
+    let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
 
     let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
     desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
@@ -1488,13 +1557,12 @@ function renderAdminHistory(filterType) {
     }
 
     let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : ''; 
-    let titleColor = getSourceColor(r.type); 
-    if (r.type === "Продажа СЦ/Фокус" && String(r.details).toLowerCase().includes("фокус")) titleColor = '#e74c3c'; 
+    let titleColor = getSourceColor(displayTitle);
     
     let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
 
     return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
-        <div class="req-title" style="color:${titleColor};">${r.type || 'Запрос'} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
+        <div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
         <div class="req-desc" style="color:var(--text-color);">${authorStr}<br><b>Детали:</b> ${desc}${selDateHtml}<br>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
                 <b style="color:${stColor}">Статус: ${stText}</b>${approverLabel}
