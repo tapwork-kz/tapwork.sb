@@ -327,7 +327,22 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true };
     }
 
-    // 3. Добираем запросы и историю из Supabase
+    // ========================================================
+    // --- ОСНОВНАЯ ЗАГРУЗКА ДАШБОРДА ---
+    // ========================================================
+    if (actionName === "getDashboardData") {
+      // 1. Получаем пользователя
+      const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
+      if (userErr || !userData) return { authorized: false };
+
+      // 2. Получаем данные из GAS (Таблица)
+      let gasData = {};
+      try {
+          let r = await fetch(GAS_URL + "?action=getDashboardData&iin=" + appState.iin + "&role=" + encodeURIComponent(userData.role) + "&dept=" + encodeURIComponent(userData.dept || "Цифра"));
+          gasData = await r.json();
+      } catch(e) { console.error("GAS offline", e); }
+
+      // 3. Добираем запросы и историю из Supabase
       const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
       let userMap = {};
       if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
