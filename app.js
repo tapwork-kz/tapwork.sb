@@ -1,4 +1,6 @@
 window.onerror = function(message, source, lineno, colno, error) {
+    // Игнорируем системный глюк при добавлении на экран (PWA)
+    if (message.includes("Script error") && lineno === 0) return true; 
     alert("ОШИБКА: " + message + " в строке " + lineno);
 };
 window.onunhandledrejection = function(event) {
@@ -331,7 +333,7 @@ async function callBackend(actionName, payloadData = {}) {
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       if (userErr || !userData) return { authorized: false };
 
-      let gasData = {};
+      let gasData = null;
       try {
         const gasResponse = await fetch(GAS_URL, { 
             method: "POST", 
@@ -344,7 +346,19 @@ async function callBackend(actionName, payloadData = {}) {
         console.error("Ошибка связи с Google Таблицами:", e); 
       }
 
+      // АНТИ-ГЛЮК: Если GAS отвалился (таймаут), достаем РЕАЛЬНЫЕ данные из кэша
+      if (!gasData || !gasData.info) {
+          try {
+              let cached = JSON.parse(localStorage.getItem("dashData_" + appState.iin));
+              if (cached) {
+                  gasData = { info: cached.info, scItems: cached.scItems, adminPlan: cached.adminPlan, tradeInModels: cached.tradeInModels, hotChecks: cached.hotChecks };
+              }
+          } catch(e){}
+      }
+      gasData = gasData || {}; // Защита от краша
+
       const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
+     
       let userMap = {};
       if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
 
@@ -430,7 +444,10 @@ async function callBackend(actionName, payloadData = {}) {
         scItems: gasData.scItems || [], 
         adminPlan: gasData.adminPlan || formatPlanHtml([]), 
         tradeInModels: gasData.tradeInModels || [], 
-        info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
+        hotChecks: gasData.hotChecks || [], // <-- ВОТ ГДЕ ОНИ ТЕРЯЛИСЬ! Возвращаем их в приложение.
+
+        // Больше никаких базовых 90%! Если данных нет даже в кэше, ставим прочерк "-".
+        info: gasData.info || { kpiValue: "-", ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
         
         userHistory: userHistory, 
         userInbox: userInbox,
