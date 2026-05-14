@@ -42,7 +42,6 @@ function formatPlanHtml(planArray) {
     return html;
 }
 
-// ИСПРАВЛЕННАЯ ФУНКЦИЯ CALLBACKEND
 async function callBackend(actionName, payloadData = {}) { 
   try { 
     const getRoleGroup = (roleText) => {
@@ -52,7 +51,6 @@ async function callBackend(actionName, payloadData = {}) {
         return "Продавец"; 
     };
 
-    // --- АВТОРИЗАЦИЯ (Supabase) ---
     if (actionName === "loginByIIN") {
       const { iin, password } = payloadData;
       const { data, error } = await supabaseClient.from('users').select('*').eq('iin', iin).single();
@@ -74,7 +72,6 @@ async function callBackend(actionName, payloadData = {}) {
       };
     }
     
-    // --- ЗАПИСЬ ДЕЙСТВИЙ ВРЕМЕНИ (Supabase) ---
     if (actionName === "recordAction") {
       const { iin, actionType, isReturn } = payloadData;
       const roleGroup = getRoleGroup(); 
@@ -104,7 +101,6 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true, savedAction: isReturn ? null : actionType };
     }
 
-    // --- ПРОВЕРКА ЛИМИТОВ ПРИ ЗАПУСКЕ (Supabase) ---
     if (actionName === "startupCheck") {
       const roleGroup = getRoleGroup();
       const dayOfWeek = new Date().getDay() || 7;
@@ -134,9 +130,6 @@ async function callBackend(actionName, payloadData = {}) {
       };
     }
 
-    // ========================================================
-    // 1. ОБРАБОТКА ЗАПРОСОВ (ОДОБРЕНИЕ / ОТКЛОНЕНИЕ / ОТВЕТЫ)
-    // ========================================================
     if (actionName === "processRequest") {
       const { reqId, reqAction, replyText } = payloadData;
       
@@ -327,97 +320,115 @@ async function callBackend(actionName, payloadData = {}) {
       return { success: true };
     }
 
-    // ========================================================
-    // --- ОСНОВНАЯ ЗАГРУЗКА ДАШБОРДА ---
-    // ========================================================
     if (actionName === "getDashboardData") {
-      // 1. Получаем пользователя
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       if (userErr || !userData) return { authorized: false };
 
-      // 2. Получаем данные из GAS (Таблица)
+      // Берем базовую инфу из Таблицы для каталогов СЦ и планов
       let gasData = {};
       try {
-          let r = await fetch(GAS_URL + "?action=getDashboardData&iin=" + appState.iin + "&role=" + encodeURIComponent(userData.role) + "&dept=" + encodeURIComponent(userData.dept || "Цифра"));
-          gasData = await r.json();
-      } catch(e) { console.error("GAS offline", e); }
+        const gasResponse = await fetch(GAS_URL, { 
+            method: "POST", 
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            redirect: "follow", 
+            body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
+        });
+        gasData = await gasResponse.json();
+      } catch (e) { 
+        console.error("Ошибка связи с Google Таблицами:", e); 
+      }
 
-      // 3. Добираем запросы и историю из Supabase
-      const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
-      let userMap = {};
-      if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
-
-      // --- ПОДГРУЗКА ОДОБРЕННЫХ KPI И БАЛЛОВ ---
+      // Скачиваем данные из Supabase
+      const { data: allUsers } = await supabaseClient.from('users').select('*');
       const { data: allUserDetails } = await supabaseClient.from('user_details').select('*');
-      if (allUserDetails && gasData) {
-          let empMap = {};
-          if (gasData.adminEmployees) gasData.adminEmployees.forEach(e => empMap[e.iin] = e);
-          if (!gasData.info) gasData.info = { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, kpiDetails: [], reports: [], myPtsHistory: [] };
+      const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
 
+      let userMap = {};
+      let adminEmployees = [];
+      
+      // Формируем список сотрудников для админки
+      if (allUsers) {
+          allUsers.forEach(u => {
+              userMap[u.iin] = u;
+              if (String(u.role).toLowerCase().includes("продавец") || String(u.role).toLowerCase().includes("промоутер") || String(u.role).toLowerCase().includes("стажер")) {
+                  adminEmployees.push({
+                      iin: u.iin, name: u.full_name || u.iin, dept: u.dept || 'Цифра', role: u.role,
+                      kpi: 90, pts: { acc: 0, use: 0, rem: 0, fin: 0 }, sales: { sc: 0, trade: 0 }, reportErrors: 0,
+                      ptsHistory: [], kpiDetails: [], reports: [], remarks: [],
+                      tabelStr: '<span style="color:#27ae60; font-weight:bold;">РД.</span>'
+                  });
+              }
+          });
+      }
+
+      let empMap = {};
+      adminEmployees.forEach(e => empMap[e.iin] = e);
+
+      // Инициализируем инфо текущего юзера
+      let myInfo = gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, kpiDetails: [], reports: [], myPtsHistory: [], remarks: [], tabel: {bs:0, bl:0, pr:0, ot:0, rd:0} };
+      myInfo.kpiValue = 90; // Базовый КФ ЭФФ
+      myInfo.ptsAccrued = 0; myInfo.ptsUsed = 0; myInfo.ptsFine = 0;
+      if (!myInfo.kpiDetails) myInfo.kpiDetails = [];
+      if (!myInfo.myPtsHistory) myInfo.myPtsHistory = [];
+
+      // Обрабатываем статистику KPI и баллов
+      if (allUserDetails) {
           allUserDetails.forEach(row => {
               let dStr = new Date(row.created_at);
               let dateFormatted = ("0" + dStr.getDate()).slice(-2) + "." + ("0" + (dStr.getMonth() + 1)).slice(-2) + "." + dStr.getFullYear() + " " + ("0" + dStr.getHours()).slice(-2) + ":" + ("0" + dStr.getMinutes()).slice(-2);
               let justDate = ("0" + dStr.getDate()).slice(-2) + "." + ("0" + (dStr.getMonth() + 1)).slice(-2) + "." + dStr.getFullYear();
 
-              // Интеграция для текущего юзера (для КФ. ЭФФ.)
-              if (row.iin === appState.iin) {
-                  let kpiVal = parseFloat(row.kpi_change) || 0;
-                  let ptsVal = parseFloat(row.points_motivation) || 0;
-                  let mnyVal = parseFloat(row.fine_money) || 0;
+              let kpiVal = parseFloat(row.kpi_change) || 0;
+              let ptsMotiv = parseFloat(row.points_motivation) || parseFloat(row.points_accrued) || 0;
+              let mnyVal = parseFloat(row.fine_money) || 0;
+              let rType = row.type || "Действие";
+              let rSource = row.category || row.type || "База";
 
+              let displayType = rType;
+              if (rType === "Продажа СЦ/Фокус") {
+                  displayType = rSource === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
+              }
+
+              // Личная статистика
+              if (row.iin === appState.iin) {
                   if (kpiVal !== 0) {
-                      gasData.info.kpiValue = (gasData.info.kpiValue || 0) + kpiVal;
-                      if(!gasData.info.kpiDetails) gasData.info.kpiDetails = [];
-                      gasData.info.kpiDetails.push({ name: row.action_text, source: row.category || row.type, val: kpiVal, date: justDate });
+                      myInfo.kpiValue += kpiVal;
+                      myInfo.kpiDetails.push({ name: row.action_text || rType, source: rSource, val: kpiVal, date: justDate });
                   }
+                  if (ptsMotiv > 0) myInfo.ptsAccrued += ptsMotiv;
+                  if (ptsMotiv < 0 && rType !== "Штраф") myInfo.ptsUsed += Math.abs(ptsMotiv);
+                  if (rType === "Штраф") myInfo.ptsFine += Math.abs(ptsMotiv);
                   
-                  if (ptsVal > 0) gasData.info.ptsAccrued = (gasData.info.ptsAccrued || 0) + ptsVal;
-                  if (ptsVal < 0 && row.type !== "Штраф") gasData.info.ptsUsed = (gasData.info.ptsUsed || 0) + Math.abs(ptsVal);
-                  if (row.type === "Штраф") gasData.info.ptsFine = (gasData.info.ptsFine || 0) + Math.abs(ptsVal);
-                  
-                  if (ptsVal !== 0 || mnyVal !== 0 || row.type === "Горячий чек" || row.type === "Продажа СЦ/Фокус") {
-                      if(!gasData.info.myPtsHistory) gasData.info.myPtsHistory = [];
-                      gasData.info.myPtsHistory.push({ type: row.type, reason: row.action_text, source: row.category || row.type, val: ptsVal, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
+                  if (ptsMotiv !== 0 || mnyVal !== 0 || rType === "Горячий чек" || rType === "Продажа СЦ/Фокус" || rType === "Начисление") {
+                      myInfo.myPtsHistory.push({ type: displayType, reason: row.action_text || rType, source: rSource, val: ptsMotiv, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
                   }
               }
 
-              // Интеграция для сотрудников (Админ панель)
-              if (empMap[row.iin]) {
-                  let e = empMap[row.iin];
-                  let kpiVal = parseFloat(row.kpi_change) || 0;
-                  let ptsVal = parseFloat(row.points_motivation) || 0;
-                  let mnyVal = parseFloat(row.fine_money) || 0;
-
+              // Статистика сотрудников для админки
+              let emp = empMap[row.iin];
+              if (emp) {
                   if (kpiVal !== 0) {
-                      e.kpi = (e.kpi || 0) + kpiVal;
-                      if(!e.kpiDetails) e.kpiDetails = [];
-                      e.kpiDetails.push({ name: row.action_text, source: row.category || row.type, val: kpiVal, date: justDate });
+                      emp.kpi += kpiVal;
+                      emp.kpiDetails.push({ name: row.action_text || rType, source: rSource, val: kpiVal, date: justDate });
                   }
-
-                  if(!e.pts) e.pts = {acc: 0, use: 0, rem: 0, fin: 0};
-                  if (ptsVal > 0) e.pts.acc += ptsVal;
-                  if (ptsVal < 0 && row.type !== "Штраф") e.pts.use += Math.abs(ptsVal);
-                  if (row.type === "Штраф") e.pts.fin += Math.abs(ptsVal);
+                  if (ptsMotiv > 0) emp.pts.acc += ptsMotiv;
+                  if (ptsMotiv < 0 && rType !== "Штраф") emp.pts.use += Math.abs(ptsMotiv);
+                  if (rType === "Штраф") emp.pts.fin += Math.abs(ptsMotiv);
                   
-                  if (ptsVal !== 0 || mnyVal !== 0 || row.type === "Горячий чек" || row.type === "Продажа СЦ/Фокус") {
-                      if(!e.ptsHistory) e.ptsHistory = [];
-                      e.ptsHistory.push({ type: row.type, reason: row.action_text, source: row.category || row.type, val: ptsVal, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
+                  if (ptsMotiv !== 0 || mnyVal !== 0 || rType === "Горячий чек" || rType === "Продажа СЦ/Фокус" || rType === "Начисление") {
+                      emp.ptsHistory.push({ type: displayType, reason: row.action_text || rType, source: rSource, val: ptsMotiv, moneyFine: mnyVal, date: dateFormatted, approver: userMap[row.manager_iin]?.full_name || '' });
                   }
+                  
+                  if (rType === "Продажа СЦ/Фокус" || rType === "СЦ") emp.sales.sc++;
+                  if (rType === "Продажа Trade-In" || rType === "Trade-In") emp.sales.trade++;
+                  if (rType === "Ошибка") emp.reportErrors++;
               }
           });
-
-          // Пересчет остатков
-          if(gasData.info) gasData.info.ptsLeft = (gasData.info.ptsAccrued || 0) - (gasData.info.ptsUsed || 0) - (gasData.info.ptsFine || 0);
-          if(gasData.adminEmployees) {
-              gasData.adminEmployees.forEach(e => {
-                  if(e.pts) e.pts.rem = (e.pts.acc || 0) - (e.pts.use || 0) - (e.pts.fin || 0);
-              });
-          }
       }
 
-      // Скачиваем ВСЕ заявки
-      const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
-      
+      myInfo.ptsLeft = myInfo.ptsAccrued - myInfo.ptsUsed - myInfo.ptsFine;
+      adminEmployees.forEach(e => { e.pts.rem = e.pts.acc - e.pts.use - e.pts.fin; });
+
       let userInbox = [], userHistory = [], adminInbox = [], adminHistory = [];
       let isDir = userData.role.toLowerCase().includes("директор") || userData.role.toLowerCase().includes("управляющий") || userData.role.toLowerCase().includes("админ") || userData.role.toLowerCase().includes("супервайзер");
       let isZavSklad = userData.role.toLowerCase().includes("заведующий складом");
@@ -430,6 +441,14 @@ async function callBackend(actionName, payloadData = {}) {
               let d = new Date(r.created_at);
               let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
               
+              let metaObj = {}; try { metaObj = JSON.parse(r.metadata || "{}"); } catch(e){}
+              
+              // РАЗДЕЛЕНИЕ СЦ И ФОКУС ПРИ ЗАГРУЗКЕ
+              let displayTitle = r.type;
+              if (r.type === "Продажа СЦ/Фокус") {
+                  displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
+              }
+
               let reqObj = {
                   id: r.id,
                   date: dateStr,
@@ -437,7 +456,8 @@ async function callBackend(actionName, payloadData = {}) {
                   authorName: author.full_name || r.author_iin,
                   authorRole: author.role || "Продавец",
                   adminDisplayName: author.dept ? `${author.full_name} — ${author.dept}` : author.full_name,
-                  type: r.type,
+                  type: displayTitle,
+                  rawType: r.type, 
                   details: r.details,
                   targetIin: r.target_iin,
                   targetName: target.full_name || "",
@@ -446,15 +466,12 @@ async function callBackend(actionName, payloadData = {}) {
               };
 
               let isDismissedByMe = false;
-              try { 
-                  let m = r.metadata || {}; 
-                  if (m.dismissedBy && m.dismissedBy.includes(appState.iin)) isDismissedByMe = true; 
-              } catch(e) {}
+              if (metaObj.dismissedBy && metaObj.dismissedBy.includes(appState.iin)) isDismissedByMe = true; 
 
               if (isDir) {
                   if (reqObj.status === "pending_admin" || reqObj.status === "pending_admin_view") adminInbox.push(reqObj);
                   if (reqObj.status === "pending_admin_view_remark" && !isDismissedByMe) adminInbox.push(reqObj);
-                  if (reqObj.type === "Замечание" && reqObj.status === "pending_user_reply" && reqObj.authorIin !== appState.iin && !isDismissedByMe) adminInbox.push(reqObj);
+                  if (reqObj.rawType === "Замечание" && reqObj.status === "pending_user_reply" && reqObj.authorIin !== appState.iin && !isDismissedByMe) adminInbox.push(reqObj);
                   
                   if (["approved", "rejected", "viewed", "rejected_by_user", "rejected_notify_user", "approved_notify_zav", "rejected_notify_zav"].includes(reqObj.status) || isDismissedByMe) {
                       if (adminHistory.length < 200) adminHistory.push(reqObj);
@@ -466,7 +483,7 @@ async function callBackend(actionName, payloadData = {}) {
                   else if (reqObj.status === "pending_user" && reqObj.targetIin === appState.iin) userInbox.push(reqObj);
                   else if (reqObj.status === "rejected_notify_user" && reqObj.authorIin === appState.iin) userInbox.push(reqObj);
                   else if (reqObj.status === "pending_user_reply" && reqObj.targetIin === appState.iin) userInbox.push(reqObj);
-                  else if (reqObj.type === "Замечание" && (reqObj.status === "pending_user_reply" || reqObj.status === "pending_admin_view_remark") && reqObj.targetIin !== appState.iin && reqObj.authorIin !== appState.iin && !isDismissedByMe) userInbox.push(reqObj);
+                  else if (reqObj.rawType === "Замечание" && (reqObj.status === "pending_user_reply" || reqObj.status === "pending_admin_view_remark") && reqObj.targetIin !== appState.iin && reqObj.authorIin !== appState.iin && !isDismissedByMe) userInbox.push(reqObj);
                   else if (reqObj.status === "notify_user_fine" && reqObj.targetIin === appState.iin && !isDismissedByMe) userInbox.push(reqObj);
                   
                   if (["approved", "rejected", "viewed", "rejected_by_user", "rejected_notify_user", "approved_notify_zav", "rejected_notify_zav", "viewed_fine"].includes(reqObj.status) || isDismissedByMe) {
@@ -488,7 +505,6 @@ async function callBackend(actionName, payloadData = {}) {
           });
       }
 
-      // 4. Склеиваем всё вместе для фронтенда (ДОБАВЛЕНЫ МАССИВЫ АДМИНКИ)
       return {
         authorized: true, 
         role: userData.role, 
@@ -499,9 +515,9 @@ async function callBackend(actionName, payloadData = {}) {
         scItems: gasData.scItems || [], 
         adminPlan: gasData.adminPlan || formatPlanHtml([]), 
         tradeInModels: gasData.tradeInModels || [], 
-        info: gasData.info || { kpiValue: 90, ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
+        info: myInfo,
         
-        adminEmployees: gasData.adminEmployees || [],
+        adminEmployees: adminEmployees, // ИЗ СУПАБЕЙЗ
         adminScItems: gasData.adminScItems || [],
         sellers: gasData.sellers || [],
         hotChecks: gasData.hotChecks || [],
@@ -1089,7 +1105,7 @@ function renderDashboardData(data, isSilent = false) {
   myReports = data.info?.reports || []; 
   myPointsHistory = data.info?.myPtsHistory || []; 
   myMoneyFinesHistory = myPointsHistory.filter(p => p && p.moneyFine && p.moneyFine !== "0" && p.moneyFine !== ""); 
-  myScHistory = myPointsHistory.filter(p => p && p.type === "Начисление");
+  myScHistory = myPointsHistory.filter(p => p && (p.type === "Продажа СЦ" || p.type === "Продажа Фокус" || p.type === "Начисление"));
   myDisplayPointsHistory = myPointsHistory.filter(p => { 
       let ptsVal = parseFloat(String(p.val).replace(',', '.')) || 0; 
       if (p.type === "KPI" && p.source !== "Горячий чек") return false; 
@@ -1151,16 +1167,16 @@ function renderDashboardData(data, isSilent = false) {
           if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
           if (metaObj.approver) approverName = formatShortName(metaObj.approver);
           
-          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата: <b>${metaObj.date}</b></span>` : "";
+          let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
           
           let desc = formatRemarkText(rawDesc);
-          let authorStr = r.type === "Замечание" ? formatRemarkAuthor(r.authorName, r.authorRole) : `<b>От:</b> ${r.authorName}`;
+          let authorStr = r.rawType === "Замечание" ? formatRemarkAuthor(r.authorName, r.authorRole) : `<b>От:</b> ${r.authorName}`;
           let d = r.date ? String(r.date) : "";
           
           if (r.status === "rejected_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #e74c3c;"><div class="req-title">❌ Штраф отклонен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> отклонен: <b>${approverName || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
           if (r.status === "approved_notify_zav") return `<div class="req-item" id="req-${r.id}" style="border-left-color: #27ae60;"><div class="req-title">✅ Штраф одобрен</div><div class="req-desc">Ваш запрос на штраф сотрудника <b>${r.targetName}</b> одобрен: <b>${approverName || 'Руководителем'}</b>.<br>Причина штрафа: ${desc}${selDateHtml}</div><div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Ознакомлен</button></div></div>`;
 
-          if (r.type === "Замечание" && (r.status === "pending_user_reply" || r.status === "pending_admin_view_remark")) { 
+          if (r.rawType === "Замечание" && (r.status === "pending_user_reply" || r.status === "pending_admin_view_remark")) { 
               if (r.targetIin === appState.iin && r.status === "pending_user_reply") {
                   return `<div class="req-item" id="req-${r.id}" style="border-left-color: #f39c12;"><div class="req-title" style="color:#f39c12;">⚠️ Замечание <span style="float:right; color:gray; font-size:10px; font-weight:normal;">${d}</span></div><div class="req-desc" style="color:var(--text-color); font-size:13px;"><b style="color:#f39c12;">${authorStr}</b><br>${desc}${selDateHtml}</div><textarea id="remark-reply-${r.id}" placeholder="Ваша обратная связь..." style="box-sizing: border-box; width:100%; height:60px; margin-bottom:8px; border-radius:8px; padding:8px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-family:inherit; resize:none;"></textarea><button class="btn-orange" onclick="processReq('${r.id}', 'reply_remark', document.getElementById('remark-reply-${r.id}').value)">Ответить</button></div>`; 
               } else {
@@ -1182,7 +1198,7 @@ function renderDashboardData(data, isSilent = false) {
   Object.keys(savedReplies).forEach(id => { let ta = document.getElementById(id); if (ta) ta.value = savedReplies[id]; });
 
   let uHistory = data.userHistory || [];
-  uHistory = uHistory.filter(r => !(r.type === "Запрос на штраф" && r.targetIin === appState.iin));
+  uHistory = uHistory.filter(r => !(r.rawType === "Запрос на штраф" && r.targetIin === appState.iin));
 
   let uHistList = document.getElementById("user-history-list");
   if (uHistList) {
@@ -1190,7 +1206,7 @@ function renderDashboardData(data, isSilent = false) {
           let stText = "Просмотрен"; let stColor = "#95a5a6";
           if (r.status.includes("approved")) { stText = "Одобрен"; stColor = "#27ae60"; } else if (r.status.includes("rejected")) { stText = "Отклонен"; stColor = "#e74c3c"; }
           
-          if (r.type === "Исправление смены") {
+          if (r.rawType === "Исправление смены") {
               if (r.status.includes("approved")) stText = "Исправлен";
               else if (r.status.includes("rejected")) stText = "Отклонен";
           }
@@ -1198,10 +1214,6 @@ function renderDashboardData(data, isSilent = false) {
           let rawDesc = String(r.details || "");
           let approverName = "";
           let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
-
-          // РАЗДЕЛЯЕМ СЦ И ФОКУС
-          let displayTitle = r.type || 'Запрос';
-          if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
           
           let match = rawDesc.match(/\n\[(.*?)\]$/);
           if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
@@ -1210,29 +1222,30 @@ function renderDashboardData(data, isSilent = false) {
           
           let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
 
-          let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
-          desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
+          let desc = r.rawType === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
+          desc = formatRemarkText(desc, r.rawType === 'Замечание' ? r.targetName : null);
           
-          let finalDescHtml = r.type === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Детали:</b> ${desc}${selDateHtml}`;
-          let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.authorName || ''}`;
+          let finalDescHtml = r.rawType === "Замечание" ? `<b>${r.targetName}</b> — ${desc}` : `<b>Детали:</b> ${desc}${selDateHtml}`;
+          let authorStr = r.rawType === "Замечание" || r.rawType === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.authorName || ''}`;
 
-          if (r.type === "Уведомление о штрафе") {
+          let displayTitle = r.type || 'Запрос';
+          let titleColor = getSourceColor(displayTitle);
+
+          if (r.rawType === "Уведомление о штрафе") {
               stColor = "#e74c3c"; 
               stText = "Ознакомлен";
               desc = `<b>Причина:</b> ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
               authorStr = `<b style="color:#e74c3c;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>`; 
               finalDescHtml = desc + selDateHtml; 
               displayTitle = "Штраф"; 
+              titleColor = "#e74c3c";
           } 
-          else if (r.type === "Запрос на штраф") { 
+          else if (r.rawType === "Запрос на штраф") { 
               desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`; 
               finalDescHtml = `<b>Детали:</b> ${desc}${selDateHtml}`;
           }
           
           let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : '';
-          
-          // ВОЗВРАЩАЕМ УНИКАЛЬНЫЕ ЦВЕТА
-          let titleColor = getSourceColor(displayTitle);
 
           return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
               <div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
@@ -1253,32 +1266,28 @@ function renderDashboardData(data, isSilent = false) {
           
           let rawDesc = String(r.details || "");
           let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
-
-          // РАЗДЕЛЯЕМ СЦ И ФОКУС
-          let displayTitle = r.type || 'Запрос';
-          if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
           
           let match = rawDesc.match(/\n\[(.*?)\]$/);
           if (match) rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim();
           
           let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
 
-          let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
+          let desc = r.rawType === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
           desc = formatRemarkText(desc);
           
-          if (r.type === "Запрос на штраф") {
+          if (r.rawType === "Запрос на штраф") {
               desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
           }
           
-          if (r.type === "Замечание") {
+          if (r.rawType === "Замечание") {
               desc = `<b>${r.targetName}</b> — ${desc}`;
               btns = `<div class="grid-btns" style="grid-template-columns: 1fr;"><button class="btn-gray" onclick="processReq('${r.id}', 'dismiss_notification')">Просмотрено</button></div>`;
           }
 
-          let authorStr = r.type === "Замечание" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
-          let finalDescHtml = r.type === "Замечание" ? desc + selDateHtml : `<b>Детали:</b> ${desc}${selDateHtml}`;
+          let authorStr = r.rawType === "Замечание" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
+          let finalDescHtml = r.rawType === "Замечание" ? desc + selDateHtml : `<b>Детали:</b> ${desc}${selDateHtml}`;
 
-          // ЦВЕТА
+          let displayTitle = r.type || 'Запрос';
           let titleColor = getSourceColor(displayTitle);
 
           return `<div class="req-item admin" id="req-${r.id}"><div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div><div class="req-desc" style="color:var(--text-color);">${authorStr}<br>${finalDescHtml}</div>${btns}</div>` 
@@ -1532,11 +1541,11 @@ function renderAdminHistory(filterType) {
 
   let aHist = window.adminHistoryGlobal || [];
   if (currentHistFilter === 'sales') {
-      aHist = aHist.filter(r => ["Продажа СЦ/Фокус", "Продажа Trade-In", "Горячий чек"].includes(r.type));
+      aHist = aHist.filter(r => ["Продажа СЦ", "Продажа Фокус", "Продажа Trade-In", "Горячий чек"].includes(r.type) || r.rawType === "Продажа СЦ/Фокус");
   } else if (currentHistFilter === 'pts') {
-      aHist = aHist.filter(r => r.type === "Баллы мотивации");
+      aHist = aHist.filter(r => r.rawType === "Баллы мотивации");
   } else if (currentHistFilter === 'viol') {
-      aHist = aHist.filter(r => r.type === "Замечание" || r.type === "Штраф" || r.type === "Запрос на штраф");
+      aHist = aHist.filter(r => r.rawType === "Замечание" || r.rawType === "Штраф" || r.rawType === "Запрос на штраф");
   }
 
   document.getElementById("admin-history-list").innerHTML = groupAndRenderByMonth(aHist, r => {
@@ -1544,7 +1553,7 @@ function renderAdminHistory(filterType) {
     let stText = r.status === "approved" || r.status === "approved_notify_zav" ? "Одобрен" : (String(r.status).includes("rejected") ? "Отклонен" : "Просмотрен"); 
     if(r.status === "rejected_by_user") stText = "Отклонен сменщиком"; 
     
-    if (r.type === "Исправление смены") {
+    if (r.rawType === "Исправление смены") {
         if (r.status.includes("approved")) stText = "Исправлен";
         else if (r.status.includes("rejected")) stText = "Отклонен";
     }
@@ -1552,10 +1561,6 @@ function renderAdminHistory(filterType) {
     let rawDesc = String(r.details || "");
     let approverName = "";
     let metaObj = {}; try { metaObj = JSON.parse(r.meta || r.metadata || "{}"); } catch(e){}
-
-    // РАЗДЕЛЯЕМ СЦ И ФОКУС
-    let displayTitle = r.type || 'Запрос';
-    if (r.type === "Продажа СЦ/Фокус") displayTitle = metaObj.type === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
     
     let match = rawDesc.match(/\n\[(.*?)\]$/);
     if (match) { approverName = formatShortName(match[1]); rawDesc = rawDesc.replace(/\n\[(.*?)\]$/, "").trim(); }
@@ -1564,17 +1569,18 @@ function renderAdminHistory(filterType) {
     
     let selDateHtml = metaObj.date ? `<br><span style="color:gray; font-size:11px;">📅 Дата в заявке: <b>${metaObj.date}</b></span>` : "";
 
-    let desc = r.type === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
-    desc = formatRemarkText(desc, r.type === 'Замечание' ? r.targetName : null);
+    let desc = r.rawType === "Обмен сменами" ? `Сменщик: ${r.targetName || ''}<br>${rawDesc}` : rawDesc; 
+    desc = formatRemarkText(desc, r.rawType === 'Замечание' ? r.targetName : null);
 
-    if (r.type === "Запрос на штраф") {
+    if (r.rawType === "Запрос на штраф") {
         desc = `Нарушитель: <b>${r.targetName}</b><br>Причина: ${metaObj.reason || desc}<br>Баллы: <b style="color:#e74c3c;">${metaObj.amount}</b> | Сумма: <b style="color:#e74c3c;">${metaObj.moneyAmount} ₸</b>`;
     }
 
     let approverLabel = approverName ? `<span style="color:gray; font-size:10px; font-weight:normal;">${approverName}</span>` : ''; 
+    let displayTitle = r.type || 'Запрос';
     let titleColor = getSourceColor(displayTitle);
     
-    let authorStr = r.type === "Замечание" || r.type === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
+    let authorStr = r.rawType === "Замечание" || r.rawType === "Запрос на штраф" ? `<b style="color:#f39c12;">${formatRemarkAuthor(r.authorName, r.authorRole)}</b>` : `<b>От:</b> ${r.adminDisplayName || r.authorName || ''}`;
 
     return `<div class="req-item" style="border-left-color: ${stColor}; opacity: 0.9;">
         <div class="req-title" style="color:${titleColor};">${displayTitle} <span style="font-size:12px; font-weight:normal; color:gray; float:right;">${r.date || ''}</span></div>
@@ -1596,7 +1602,7 @@ function renderAdminEmps(dept, btnElement) {
    currentEmpDept = dept; if (btnElement) { document.getElementById('flt-emp-cifra').classList.remove('active-flt'); document.getElementById('flt-emp-mbt').classList.remove('active-flt'); document.getElementById('flt-emp-kbt').classList.remove('active-flt'); btnElement.classList.add('active-flt'); }
    let container = document.getElementById("admin-emp-list"); let filtered = allEmployeesData.filter(e => e.dept.toLowerCase().includes(dept.toLowerCase())); let currentMonth = new Date().getMonth() + 1; let currentYear = new Date().getFullYear(); let monthSuffix = ("0" + currentMonth).slice(-2) + "." + currentYear;
    container.innerHTML = filtered.map(e => { 
-       let monthScHist = e.ptsHistory.filter(p => p.type === "Начисление" && typeof p.date === 'string' && p.date.includes(monthSuffix)); 
+       let monthScHist = e.ptsHistory.filter(p => (p.type === "Продажа СЦ" || p.type === "Продажа Фокус" || p.type === "Начисление") && typeof p.date === 'string' && p.date.includes(monthSuffix)); 
        let curMonthSc = monthScHist.filter(p => !p.source.toLowerCase().includes("trade-in")).length; 
        let curMonthTrade = monthScHist.filter(p => p.source.toLowerCase().includes("trade-in")).length; 
        
@@ -1679,7 +1685,7 @@ function renderAdminScItems(dept, btnElement) {
        }
    } else { 
        let historyArray = window.adminHistoryGlobal || []; 
-       let sold = historyArray.filter(r => r.status === "approved" && r.type === "Продажа СЦ/Фокус");
+       let sold = historyArray.filter(r => r.status === "approved" && r.rawType === "Продажа СЦ/Фокус");
        
        if (dept === "Фокус") { 
            sold = sold.filter(r => { 
