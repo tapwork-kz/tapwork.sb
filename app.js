@@ -1,5 +1,4 @@
 window.onerror = function(message, source, lineno, colno, error) {
-    // Игнорируем системный глюк при добавлении на экран (PWA)
     if (message.includes("Script error") && lineno === 0) return true; 
     alert("ОШИБКА: " + message + " в строке " + lineno);
 };
@@ -390,52 +389,65 @@ async function callBackend(actionName, payloadData = {}) {
               let d = new Date(ud.created_at);
               let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
 
-              let histItem = {
-                  date: dateStr,
-                  type: ud.type,
-                  source: ud.category || ud.type,
-                  reason: ud.action_text || "",
-                  val: ud.points_motivation,
-                  approver: ud.manager_iin ? (userMap[ud.manager_iin]?.full_name || ud.manager_iin) : "",
-                  moneyFine: ud.fine_money || 0,
-                  kpiChange: ud.kpi_change || 0
-              };
+              let ptsMotivation = parseFloat(ud.points_motivation) || 0;
+              let kpiChange = parseFloat(ud.kpi_change) || 0;
+              let managerName = ud.manager_iin ? (userMap[ud.manager_iin]?.full_name || ud.manager_iin) : "";
 
-              // Корректировка типов для красивого отображения в истории
-              if (ud.type === "Горячий чек") {
-                  histItem.type = "KPI"; histItem.source = "Горячий чек";
-                  histItem.val = ud.points_motivation > 0 ? "+" + ud.points_motivation : (ud.kpi_change > 0 ? "+" + ud.kpi_change : 0);
-              } else if (ud.type === "Продажа СЦ/Фокус" || ud.type === "Продажа Trade-In") {
-                  histItem.type = "Начисление"; histItem.source = ud.category || (ud.type === "Продажа Trade-In" ? "Trade-In" : "СЦ");
-                  histItem.val = "+" + (ud.points_motivation || 0);
-              } else if (ud.type === "Использование") {
-                  histItem.type = "Использование"; histItem.source = "Мотивация";
-              } else if (ud.type === "Штраф") {
-                  histItem.type = "Штраф"; histItem.source = histItem.approver;
-              }
+              // 1. ЛОГИКА ТОЛЬКО ДЛЯ БАЛЛОВ МОТИВАЦИИ (Уходит во вкладку "Баллы")
+              if (ptsMotivation !== 0 || ud.type === "Штраф") {
+                  let histItem = {
+                      date: dateStr, type: ud.type, source: ud.category || ud.type,
+                      reason: ud.action_text || "", val: ptsMotivation > 0 ? "+" + ptsMotivation : ptsMotivation,
+                      approver: managerName, moneyFine: ud.fine_money || 0, kpiChange: kpiChange
+                  };
 
-              // Добавляем текущему пользователю
-              if (ud.iin === appState.iin) {
-                  myPtsHistory.push(histItem);
-                  if (ud.kpi_change) myKpiChanges += parseFloat(ud.kpi_change);
-              }
-
-              // Добавляем в админку для директора
-              if (empMap[ud.iin]) {
-                  empMap[ud.iin].ptsHistory.push(histItem);
-                  let pts = parseFloat(ud.points_motivation) || 0;
-                  if (histItem.type === "Начисление") empMap[ud.iin].pts.acc += pts;
-                  if (histItem.type === "Использование") empMap[ud.iin].pts.use += Math.abs(pts);
-                  if (histItem.type === "Штраф") empMap[ud.iin].pts.fin += Math.abs(pts);
-                  
-                  if (histItem.type === "Начисление") {
-                      if (histItem.source === "Trade-In") empMap[ud.iin].sales.trade++;
-                      else empMap[ud.iin].sales.sc++;
+                  if (ud.type === "Продажа СЦ/Фокус" || ud.type === "Продажа Trade-In") {
+                      histItem.type = "Начисление"; 
+                      histItem.source = ud.category || (ud.type === "Продажа Trade-In" ? "Trade-In" : "СЦ");
+                      histItem.val = "+" + ptsMotivation;
+                  } else if (ud.type === "Использование") {
+                      histItem.type = "Использование"; histItem.source = "Мотивация";
+                  } else if (ud.type === "Штраф") {
+                      histItem.type = "Штраф"; histItem.source = managerName;
+                  } else if (ud.type === "Горячий чек") {
+                      histItem.type = "Начисление"; histItem.source = "Горячий чек";
+                      histItem.val = "+" + ptsMotivation;
                   }
 
-                  if (ud.kpi_change) {
-                      empMap[ud.iin].kpi += parseFloat(ud.kpi_change);
-                      empMap[ud.iin].kpiDetails.push({ name: histItem.reason, source: histItem.source, val: parseFloat(ud.kpi_change), date: dateStr });
+                  if (ud.iin === appState.iin) {
+                      myPtsHistory.push(histItem);
+                  }
+
+                  if (empMap[ud.iin]) {
+                      empMap[ud.iin].ptsHistory.push(histItem);
+                      if (histItem.type === "Начисление") {
+                          empMap[ud.iin].pts.acc += ptsMotivation;
+                          if (histItem.source === "Trade-In") empMap[ud.iin].sales.trade++;
+                          else empMap[ud.iin].sales.sc++;
+                      }
+                      if (histItem.type === "Использование") empMap[ud.iin].pts.use += Math.abs(ptsMotivation);
+                      if (histItem.type === "Штраф") empMap[ud.iin].pts.fin += Math.abs(ptsMotivation);
+                  }
+              }
+
+              // 2. ЛОГИКА ТОЛЬКО ДЛЯ КФ. ЭФФ. (Уходит во вкладку "КФ. ЭФФ.")
+              if (kpiChange !== 0) {
+                  let kpiItem = {
+                      name: ud.type === "Горячий чек" ? ud.action_text : (ud.type === "Продажа СЦ/Фокус" ? ud.action_text : ud.type),
+                      source: ud.type === "Продажа СЦ/Фокус" ? (ud.category || "СЦ") : ud.type,
+                      val: kpiChange,
+                      date: dateStr
+                  };
+
+                  if (ud.iin === appState.iin) {
+                      if (!gasData.info.kpiDetails) gasData.info.kpiDetails = [];
+                      gasData.info.kpiDetails.push(kpiItem);
+                      myKpiChanges += kpiChange;
+                  }
+
+                  if (empMap[ud.iin]) {
+                      empMap[ud.iin].kpi += kpiChange;
+                      empMap[ud.iin].kpiDetails.push(kpiItem);
                   }
               }
           });
