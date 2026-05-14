@@ -333,7 +333,7 @@ async function callBackend(actionName, payloadData = {}) {
       const { data: userData, error: userErr } = await supabaseClient.from('users').select('*').eq('iin', appState.iin).single();
       if (userErr || !userData) return { authorized: false };
 
-      let gasData = null;
+      let gasData = {};
       try {
         const gasResponse = await fetch(GAS_URL, { 
             method: "POST", 
@@ -342,28 +342,123 @@ async function callBackend(actionName, payloadData = {}) {
             body: JSON.stringify({ action: "getHybridData", payload: { iin: appState.iin, dept: userData.dept, role: userData.role, name: userData.full_name } }) 
         });
         gasData = await gasResponse.json();
-      } catch (e) { 
-        console.error("Ошибка связи с Google Таблицами:", e); 
-      }
+      } catch (e) { console.error("Ошибка связи с Google Таблицами:", e); }
 
-      // АНТИ-ГЛЮК: Если GAS отвалился (таймаут), достаем РЕАЛЬНЫЕ данные из кэша
       if (!gasData || !gasData.info) {
           try {
               let cached = JSON.parse(localStorage.getItem("dashData_" + appState.iin));
-              if (cached) {
-                  gasData = { info: cached.info, scItems: cached.scItems, adminPlan: cached.adminPlan, tradeInModels: cached.tradeInModels, hotChecks: cached.hotChecks };
-              }
+              if (cached) gasData = { info: cached.info, scItems: cached.scItems, adminPlan: cached.adminPlan, tradeInModels: cached.tradeInModels, hotChecks: cached.hotChecks };
           } catch(e){}
       }
-      gasData = gasData || {}; // Защита от краша
+      gasData = gasData || {};
+      if (!gasData.info) gasData.info = { kpiValue: "-", ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [], remarks: [] };
 
+      // --- ЧИТАЕМ ДАННЫЕ ИЗ SUPABASE ---
       const { data: allUsers } = await supabaseClient.from('users').select('iin, full_name, role, dept');
-     
-      let userMap = {};
-      if (allUsers) allUsers.forEach(u => userMap[u.iin] = u);
-
       const { data: allReqs } = await supabaseClient.from('requests').select('*').order('created_at', { ascending: false });
       
+      // ВОТ ЭТОТ НОВЫЙ ЗАПРОС ВЕРНЕТ ВСЕ ОДОБРЕННЫЕ ДАННЫЕ!
+      const { data: allUserDetails } = await supabaseClient.from('user_details').select('*').order('created_at', { ascending: false });
+
+      let userMap = {};
+      let adminEmployees = [];
+      let empMap = {};
+
+      if (allUsers) {
+          allUsers.forEach(u => {
+              userMap[u.iin] = u;
+              if (!u.role.toLowerCase().includes("директор")) {
+                  let emp = {
+                      iin: u.iin, name: u.full_name, dept: u.dept || 'Цифра',
+                      kpi: gasData.info?.baseKpi || 90, kpiDetails: [],
+                      pts: { acc: 0, use: 0, rem: 0, fin: 0 },
+                      sales: { sc: 0, trade: 0 }, reportErrors: 0, reports: [], ptsHistory: [], remarks: [],
+                      tabelStr: "<span style='color:gray; font-size:11px;'>Нет данных</span>"
+                  };
+                  adminEmployees.push(emp);
+                  empMap[u.iin] = emp;
+              }
+          });
+      }
+
+      let myPtsHistory = [];
+      let myKpiChanges = 0;
+
+      // ОБРАБАТЫВАЕМ ТАБЛИЦУ user_details И РАСКИДЫВАЕМ В ИСТОРИЮ
+      if (allUserDetails) {
+          allUserDetails.forEach(ud => {
+              let d = new Date(ud.created_at);
+              let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+
+              let histItem = {
+                  date: dateStr,
+                  type: ud.type,
+                  source: ud.category || ud.type,
+                  reason: ud.action_text || "",
+                  val: ud.points_motivation,
+                  approver: ud.manager_iin ? (userMap[ud.manager_iin]?.full_name || ud.manager_iin) : "",
+                  moneyFine: ud.fine_money || 0,
+                  kpiChange: ud.kpi_change || 0
+              };
+
+              // Корректировка типов для красивого отображения в истории
+              if (ud.type === "Горячий чек") {
+                  histItem.type = "KPI"; histItem.source = "Горячий чек";
+                  histItem.val = ud.points_motivation > 0 ? "+" + ud.points_motivation : (ud.kpi_change > 0 ? "+" + ud.kpi_change : 0);
+              } else if (ud.type === "Продажа СЦ/Фокус" || ud.type === "Продажа Trade-In") {
+                  histItem.type = "Начисление"; histItem.source = ud.category || (ud.type === "Продажа Trade-In" ? "Trade-In" : "СЦ");
+                  histItem.val = "+" + (ud.points_motivation || 0);
+              } else if (ud.type === "Использование") {
+                  histItem.type = "Использование"; histItem.source = "Мотивация";
+              } else if (ud.type === "Штраф") {
+                  histItem.type = "Штраф"; histItem.source = histItem.approver;
+              }
+
+              // Добавляем текущему пользователю
+              if (ud.iin === appState.iin) {
+                  myPtsHistory.push(histItem);
+                  if (ud.kpi_change) myKpiChanges += parseFloat(ud.kpi_change);
+              }
+
+              // Добавляем в админку для директора
+              if (empMap[ud.iin]) {
+                  empMap[ud.iin].ptsHistory.push(histItem);
+                  let pts = parseFloat(ud.points_motivation) || 0;
+                  if (histItem.type === "Начисление") empMap[ud.iin].pts.acc += pts;
+                  if (histItem.type === "Использование") empMap[ud.iin].pts.use += Math.abs(pts);
+                  if (histItem.type === "Штраф") empMap[ud.iin].pts.fin += Math.abs(pts);
+                  
+                  if (histItem.type === "Начисление") {
+                      if (histItem.source === "Trade-In") empMap[ud.iin].sales.trade++;
+                      else empMap[ud.iin].sales.sc++;
+                  }
+
+                  if (ud.kpi_change) {
+                      empMap[ud.iin].kpi += parseFloat(ud.kpi_change);
+                      empMap[ud.iin].kpiDetails.push({ name: histItem.reason, source: histItem.source, val: parseFloat(ud.kpi_change), date: dateStr });
+                  }
+              }
+          });
+      }
+
+      // Высчитываем остатки
+      adminEmployees.forEach(e => { e.pts.rem = e.pts.acc - e.pts.use - e.pts.fin; });
+
+      // Обновляем статистику пользователя на главном экране
+      let myAcc=0, myUse=0, myFin=0;
+      myPtsHistory.forEach(h => {
+           let pts = parseFloat(String(h.val).replace('+','').replace(',','.')) || 0;
+           if (h.type === "Начисление") myAcc += pts;
+           if (h.type === "Использование") myUse += Math.abs(pts);
+           if (h.type === "Штраф") myFin += Math.abs(pts);
+      });
+      gasData.info.myPtsHistory = myPtsHistory;
+      gasData.info.ptsAccrued = myAcc;
+      gasData.info.ptsUsed = myUse;
+      gasData.info.ptsFine = myFin;
+      gasData.info.ptsLeft = myAcc - myUse - myFin;
+      if (!isNaN(gasData.info.kpiValue)) gasData.info.kpiValue = parseFloat(gasData.info.kpiValue) + myKpiChanges;
+
       let userInbox = [], userHistory = [], adminInbox = [], adminHistory = [];
       let isDir = userData.role.toLowerCase().includes("директор") || userData.role.toLowerCase().includes("управляющий") || userData.role.toLowerCase().includes("админ") || userData.role.toLowerCase().includes("супервайзер");
       let isZavSklad = userData.role.toLowerCase().includes("заведующий складом");
@@ -372,36 +467,32 @@ async function callBackend(actionName, payloadData = {}) {
           allReqs.forEach(r => {
               let author = userMap[r.author_iin] || {};
               let target = userMap[r.target_iin] || {};
-              
               let d = new Date(r.created_at);
               let dateStr = ("0" + d.getDate()).slice(-2) + "." + ("0" + (d.getMonth() + 1)).slice(-2) + "." + d.getFullYear() + " " + ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
               
               let reqObj = {
-                  id: r.id,
-                  date: dateStr,
-                  authorIin: r.author_iin,
-                  authorName: author.full_name || r.author_iin,
-                  authorRole: author.role || "Продавец",
-                  adminDisplayName: author.dept ? `${author.full_name} — ${author.dept}` : author.full_name,
-                  type: r.type,
-                  details: r.details,
-                  targetIin: r.target_iin,
-                  targetName: target.full_name || "",
-                  status: r.status === 'pending' ? 'pending_admin' : r.status,
-                  meta: r.metadata ? JSON.stringify(r.metadata) : "{}"
+                  id: r.id, date: dateStr, authorIin: r.author_iin, authorName: author.full_name || r.author_iin,
+                  authorRole: author.role || "Продавец", adminDisplayName: author.dept ? `${author.full_name} — ${author.dept}` : author.full_name,
+                  type: r.type, details: r.details, targetIin: r.target_iin, targetName: target.full_name || "",
+                  status: r.status === 'pending' ? 'pending_admin' : r.status, meta: r.metadata ? JSON.stringify(r.metadata) : "{}"
               };
 
               let isDismissedByMe = false;
-              try { 
-                  let m = r.metadata || {}; 
-                  if (m.dismissedBy && m.dismissedBy.includes(appState.iin)) isDismissedByMe = true; 
-              } catch(e) {}
+              try { let m = r.metadata || {}; if (m.dismissedBy && m.dismissedBy.includes(appState.iin)) isDismissedByMe = true; } catch(e) {}
+
+              // Парсинг замечаний
+              if (r.type === "Замечание" && (r.status === "approved" || r.status === "pending_user_reply" || r.status === "pending_admin_view_remark")) {
+                  if (empMap[r.target_iin]) empMap[r.target_iin].remarks.push({ details: r.details, authorName: author.full_name, authorRole: author.role, date: dateStr });
+                  if (r.target_iin === appState.iin) {
+                      if (!gasData.info.remarks) gasData.info.remarks = [];
+                      gasData.info.remarks.push({ details: r.details, authorName: author.full_name, authorRole: author.role, date: dateStr });
+                  }
+              }
 
               if (isDir) {
                   if (reqObj.status === "pending_admin" || reqObj.status === "pending_admin_view") adminInbox.push(reqObj);
                   if (reqObj.status === "pending_admin_view_remark" && !isDismissedByMe) adminInbox.push(reqObj);
                   if (reqObj.type === "Замечание" && reqObj.status === "pending_user_reply" && reqObj.authorIin !== appState.iin && !isDismissedByMe) adminInbox.push(reqObj);
-                  
                   if (["approved", "rejected", "viewed", "rejected_by_user", "rejected_notify_user", "approved_notify_zav", "rejected_notify_zav"].includes(reqObj.status) || isDismissedByMe) {
                       if (adminHistory.length < 200) adminHistory.push(reqObj);
                   }
@@ -435,24 +526,10 @@ async function callBackend(actionName, payloadData = {}) {
       }
 
       return {
-        authorized: true, 
-        role: userData.role, 
-        name: userData.full_name, 
-        dept: userData.dept, 
-        isPromoter: userData.role.toLowerCase().includes("промоутер"),
-        
-        scItems: gasData.scItems || [], 
-        adminPlan: gasData.adminPlan || formatPlanHtml([]), 
-        tradeInModels: gasData.tradeInModels || [], 
-        hotChecks: gasData.hotChecks || [], // <-- ВОТ ГДЕ ОНИ ТЕРЯЛИСЬ! Возвращаем их в приложение.
-
-        // Больше никаких базовых 90%! Если данных нет даже в кэше, ставим прочерк "-".
-        info: gasData.info || { kpiValue: "-", ptsLeft: 0, ptsAccrued: 0, ptsUsed: 0, ptsFine: 0, tabel: {bs:0, bl:0, pr:0, ot:0, rd:0}, kpiDetails: [], reports: [], myPtsHistory: [] },
-        
-        userHistory: userHistory, 
-        userInbox: userInbox,
-        adminInbox: adminInbox,
-        adminHistory: adminHistory
+        authorized: true, role: userData.role, name: userData.full_name, dept: userData.dept, isPromoter: userData.role.toLowerCase().includes("промоутер"),
+        scItems: gasData.scItems || [], adminPlan: gasData.adminPlan || formatPlanHtml([]), tradeInModels: gasData.tradeInModels || [], hotChecks: gasData.hotChecks || [],
+        info: gasData.info, userHistory: userHistory, userInbox: userInbox, adminInbox: adminInbox, adminHistory: adminHistory,
+        adminEmployees: adminEmployees // <-- Сюда теперь прилетают сотрудники вместе с их историей баллов
       };
     }
 
