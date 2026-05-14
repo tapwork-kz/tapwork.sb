@@ -228,14 +228,22 @@ async function callBackend(actionName, payloadData = {}) {
                       newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
                   }
                   else if (reqType === "Продажа СЦ/Фокус" || reqType === "Продажа Trade-In") {
-                      let isTradeIn = reqType === "Продажа Trade-In";
-                      let earnSourceType = isTradeIn ? "Trade-In" : (metaObj.type || reqType);
-                      let pts = isTradeIn ? 1 : (parseFloat(metaObj.pts) || 0);
-                      
-                      const { error: insErr } = await supabaseClient.from('user_details').insert([{
-                          iin: req.author_iin, type: reqType, category: earnSourceType, action_text: req.details,
-                          points_motivation: pts, kpi_change: 3
-                      }]);
+    let isTradeIn = reqType === "Продажа Trade-In";
+    // ЧЕТКО ОПРЕДЕЛЯЕМ: СЦ или ФОКУС
+    let earnSourceType = isTradeIn ? "Trade-In" : (metaObj.type === "Фокус" ? "Фокус" : "СЦ");
+    let pts = isTradeIn ? 1 : (parseFloat(metaObj.pts) || 0);
+    
+    // Получаем значение KPI из настроек (по умолчанию 3, если не прогрузилось)
+    let kpiBonus = isTradeIn ? (appState.kpiCfg?.tradein || 3) : (appState.kpiCfg?.sc || 3);
+
+    const { error: insErr } = await supabaseClient.from('user_details').insert([{
+        iin: req.author_iin, 
+        type: reqType, 
+        category: earnSourceType, 
+        action_text: req.details,
+        points_motivation: pts, 
+        kpi_change: kpiBonus
+    }]);
                       if (insErr) return { success: false, error: "Ошибка БД: " + insErr.message };
 
                       newStatus = "approved"; isHandled = true; responseMsg = "Одобрено";
@@ -385,9 +393,9 @@ async function callBackend(actionName, payloadData = {}) {
               let rSource = row.category || row.type || "База";
 
               let displayType = rType;
-              if (rType === "Продажа СЦ/Фокус") {
-                  displayType = rSource === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
-              }
+if (rType === "Продажа СЦ/Фокус") {
+    displayType = rSource === "Фокус" ? "Продажа Фокус" : "Продажа СЦ";
+}
 
               // Личная статистика
               if (row.iin === appState.iin) {
