@@ -1037,7 +1037,7 @@ function renderDashboardData(data, isSilent = false) {
 
   let hcCard = document.getElementById("hot-check-card");
   if (hcCard && data.hotChecks && data.hotChecks.length > 0) {
-      let hcHtml = `<h3 style="margin-bottom: 10px; font-size: 14px;">Горячий чек</h3>`;
+      let hcHtml = `<h3 style="margin-bottom: 10px; font-size: 14px; color: #e84393;">Горячий чек</h3>`;
       let groups = {};
       data.hotChecks.forEach(hc => { if(!groups[hc.sub]) groups[hc.sub] = []; groups[hc.sub].push(hc); });
       
