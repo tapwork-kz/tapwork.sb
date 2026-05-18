@@ -27,6 +27,191 @@ function safeIin(val) { if(val === undefined || val === null) return ""; return 
 function requestNotificationPermission() { if ("Notification" in window && Notification.permission !== "granted" && Notification.permission !== "denied") Notification.requestPermission(); }
 function showPushNotification(title, bodyText) { if ("Notification" in window && Notification.permission === "granted") new Notification(title, { body: bodyText, icon: "icon.png" }); }
 
+// Функция форматирования чисел с пробелами
+function fmtSum(val) { 
+    if(!val) return "0"; 
+    return String(val).replace(/\s/g, '').replace(/\B(?=(\d{3})+(?!\d))/g, " "); 
+}
+
+// Универсальная рисовалка карточек
+function renderPlanUI(pData) {
+    let area = document.getElementById("plan-render-area");
+    if (!area) return;
+    if (!pData || !pData.to) { area.innerHTML = "<p style='text-align:center;color:gray;font-size:12px;'>Нет данных</p>"; return; }
+
+    let getColor = (pct) => { let p = parseFloat(String(pct).replace(/\s/g, '').replace(',', '.')) || 0; return p >= 100 ? "#27ae60" : (p >= 80 ? "#f39c12" : "#e74c3c"); };
+
+    let html = "";
+    
+    // 1. Сводка ОБЩАЯ
+    html += `<div class="inner-block card" style="margin-bottom:12px;">
+        <div style="font-size:14px; font-weight:bold; color:gray; text-align:center; margin-bottom:12px; border-bottom:1px solid var(--border-color); padding-bottom:8px;">Общая сводка</div>
+        
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-bottom:10px;">
+           <div style="background:var(--inner-bg); padding:10px; border-radius:8px; text-align:center;">
+               <div style="color:gray; font-size:10px; margin-bottom:4px; text-transform:uppercase;">План ТО</div>
+               <b style="color:var(--text-color); font-size:15px;">${pData.to.total.plan}</b>
+           </div>
+           <div style="background:var(--inner-bg); padding:10px; border-radius:8px; text-align:center;">
+               <div style="color:gray; font-size:10px; margin-bottom:4px; text-transform:uppercase;">Факт ТО (с ЭД)</div>
+               <b style="color:var(--btn-color); font-size:15px;">${pData.to.total.fact} <span style="font-size:11px; color:gray;">/ ${pData.to.total.factEd}</span></b>
+           </div>
+        </div>
+        
+        <div style="display:grid; grid-template-columns: 60px 1fr 60px 60px; gap:4px; font-size:12px; align-items:center; margin-bottom:6px;">
+            <b style="color:gray;">АКС</b>
+            <span style="color:var(--text-color); text-align:right;">${pData.aks.total.plan} |</span>
+            <span style="color:var(--btn-color); text-align:left;">${pData.aks.total.fact}</span>
+            <span style="background:var(--inner-bg); color:${getColor(pData.aks.total.pct)}; padding:4px; border-radius:6px; text-align:center; font-weight:bold;">${pData.aks.total.pct}</span>
+        </div>
+        
+        <div style="display:grid; grid-template-columns: 60px 1fr 60px 60px; gap:4px; font-size:12px; align-items:center; margin-bottom:6px;">
+            <b style="color:gray;">УСЛУГИ</b>
+            <span style="color:var(--text-color); text-align:right;">${pData.usl.total.plan} |</span>
+            <span style="color:var(--btn-color); text-align:left;">${pData.usl.total.fact}</span>
+            <span style="background:var(--inner-bg); color:${getColor(pData.usl.total.pct)}; padding:4px; border-radius:6px; text-align:center; font-weight:bold;">${pData.usl.total.pct}</span>
+        </div>
+    </div>`;
+
+    // 2. Отделы (Сборная таблица)
+    html += `<div class="inner-block card" style="margin-bottom:12px;">
+        <div style="font-size:14px; font-weight:bold; color:gray; text-align:center; margin-bottom:12px; border-bottom:1px solid var(--border-color); padding-bottom:8px;">По отделам</div>
+        <table style="width:100%; border-collapse:collapse; font-size:11px; text-align:center; color:var(--text-color);">
+            <tr style="color:gray; font-size:9px; text-transform:uppercase;">
+                <td style="text-align:left; padding-bottom:6px; width:25%;">Отдел</td>
+                <td style="padding-bottom:6px; width:25%;">ТО (Факт)</td>
+                <td style="padding-bottom:6px; width:25%;">АКС (Факт)</td>
+                <td style="padding-bottom:6px; width:25%;">УСЛ (Факт)</td>
+            </tr>`;
+    
+    for (let i = 0; i < 3; i++) {
+        let dTo = pData.to.depts[i] || {};
+        let dAks = pData.aks.depts[i] || {};
+        let dUsl = pData.usl.depts[i] || {};
+        html += `<tr style="border-bottom:1px solid var(--border-color);">
+            <td style="text-align:left; padding:8px 0; font-weight:bold;">${dTo.name || '-'}</td>
+            <td>${dTo.fact}<br><span style="color:${getColor(dTo.pct)}; font-size:9px;">${dTo.pct}</span></td>
+            <td>${dAks.fact}<br><span style="color:${getColor(dAks.pct)}; font-size:9px;">${dAks.pct}</span></td>
+            <td>${dUsl.fact}<br><span style="color:${getColor(dUsl.pct)}; font-size:9px;">${dUsl.pct}</span></td>
+        </tr>`;
+    }
+    html += `</table></div>`;
+
+    // 3. План на продавца
+    html += `<div class="inner-block card">
+        <div style="font-size:14px; font-weight:bold; color:gray; text-align:center; margin-bottom:12px; border-bottom:1px solid var(--border-color); padding-bottom:8px;">План на продавца</div>
+        <table style="width:100%; border-collapse:collapse; font-size:11px; text-align:center; color:var(--text-color);">
+            <tr style="color:gray; font-size:9px; text-transform:uppercase;">
+                <td style="text-align:left; padding-bottom:6px;">Отдел</td>
+                <td style="padding-bottom:6px;">ТО</td>
+                <td style="padding-bottom:6px;">АКС</td>
+                <td style="padding-bottom:6px;">УСЛ</td>
+            </tr>`;
+    (pData.sellers || []).forEach(s => {
+        html += `<tr style="border-bottom:1px solid var(--border-color);">
+            <td style="text-align:left; padding:8px 0; font-weight:bold;">${s.name}</td>
+            <td style="color:var(--btn-color);">${s.to}</td><td style="color:var(--btn-color);">${s.aks}</td><td style="color:var(--btn-color);">${s.usl}</td>
+        </tr>`;
+    });
+    html += `</table></div>`;
+
+    area.innerHTML = html;
+}
+
+// Загрузка плана из базы (для выбранного периода)
+async function loadPlanHistory() {
+    let startD = document.getElementById("plan-filter-start").value;
+    let endD = document.getElementById("plan-filter-end").value;
+    let todayStr = new Date().toISOString().split('T')[0];
+
+    // Если запрошен только сегодняшний день - показываем живые данные
+    if (startD === todayStr && endD === todayStr && window.currentPlanDataObj) {
+        return renderPlanUI(window.currentPlanDataObj);
+    }
+
+    showToast("Загрузка периода...", false, 9999);
+    
+    // Тянем данные из Supabase за выбранный промежуток
+    const { data: plansData, error } = await supabaseClient
+        .from('store_plans')
+        .select('*')
+        .gte('date', startD)
+        .lte('date', endD)
+        .order('date', { ascending: false });
+
+    if (error) {
+        showToast("Ошибка базы: " + error.message, true);
+        return;
+    }
+
+    if (!plansData || plansData.length === 0) {
+        showToast("За этот период данных нет", true);
+        document.getElementById("plan-render-area").innerHTML = "<p style='text-align:center;color:gray;font-size:12px; margin-top:20px;'>Нет записей в базе</p>";
+        return;
+    }
+
+    document.getElementById("toast").classList.remove("show");
+
+    // Берем данные последнего дня как основу (для планов)
+    let aggregated = JSON.parse(JSON.stringify(plansData[0].plan_data));
+    
+    // Вспомогательная функция сложения
+    let parse = (str) => parseFloat(String(str).replace(/\s/g, '').replace(',', '.')) || 0;
+
+    // Если выбран период больше одного дня - суммируем ФАКТЫ
+    if (plansData.length > 1) {
+        // Обнуляем факты основы
+        let clearFacts = (obj) => {
+            obj.fact = 0; obj.factEd = 0; 
+            if(obj.plan) obj.plan = 0; // Суммируем и планы, если нужно (если план дневной)
+        };
+        
+        clearFacts(aggregated.to.total);
+        clearFacts(aggregated.aks.total);
+        clearFacts(aggregated.usl.total);
+        aggregated.to.depts.forEach(clearFacts); aggregated.aks.depts.forEach(clearFacts); aggregated.usl.depts.forEach(clearFacts);
+
+        plansData.forEach(day => {
+            let pd = day.plan_data;
+            
+            // Суммируем ТО
+            aggregated.to.total.fact += parse(pd.to.total.fact);
+            aggregated.to.total.plan += parse(pd.to.total.plan); // Закомментируй если план на месяц и суммировать не надо
+            aggregated.to.total.factEd += parse(pd.to.total.factEd);
+            
+            for(let i=0; i<3; i++) {
+                aggregated.to.depts[i].fact += parse(pd.to.depts[i].fact);
+                aggregated.aks.depts[i].fact += parse(pd.aks.depts[i].fact);
+                aggregated.usl.depts[i].fact += parse(pd.usl.depts[i].fact);
+            }
+            
+            // Суммируем АКС и УСЛ
+            aggregated.aks.total.fact += parse(pd.aks.total.fact);
+            aggregated.usl.total.fact += parse(pd.usl.total.fact);
+        });
+
+        // Пересчитываем проценты: (Факт / План) * 100
+        let calcPct = (f, p) => (p > 0) ? Math.round((f / p) * 100) + "%" : "0%";
+        aggregated.to.total.pct = calcPct(aggregated.to.total.fact, aggregated.to.total.plan);
+        aggregated.aks.total.pct = calcPct(aggregated.aks.total.fact, parse(aggregated.aks.total.plan));
+        aggregated.usl.total.pct = calcPct(aggregated.usl.total.fact, parse(aggregated.usl.total.plan));
+        
+        for(let i=0; i<3; i++) {
+            aggregated.to.depts[i].pct = calcPct(aggregated.to.depts[i].fact, parse(aggregated.to.depts[i].plan));
+            aggregated.aks.depts[i].pct = calcPct(aggregated.aks.depts[i].fact, parse(aggregated.aks.depts[i].plan));
+            aggregated.usl.depts[i].pct = calcPct(aggregated.usl.depts[i].fact, parse(aggregated.usl.depts[i].plan));
+        }
+
+        // Форматируем обратно с пробелами для красоты
+        let fmt = (val) => fmtSum(val);
+        aggregated.to.total.fact = fmt(aggregated.to.total.fact);
+        aggregated.to.total.plan = fmt(aggregated.to.total.plan);
+        // ... (аналогично форматируем остальные цифры, если требуется идеальный вид)
+    }
+
+    renderPlanUI(aggregated);
+}
+
 // Вспомогательная функция для форматирования плана
 function formatPlanHtml(planArray) {
     if (!planArray || planArray.length === 0) return "<p style='color:gray; font-size:12px; text-align:center;'>План на сегодня не загружен</p>";
@@ -1055,7 +1240,26 @@ function renderDashboardData(data, isSilent = false) {
           appState.lastInboxCount = 0; 
       }
       let adminPlanList = document.getElementById("admin-plan-list");
-      if(adminPlanList) adminPlanList.innerHTML = data.adminPlan || "<p>План не загружен</p>"; 
+      // Подключаем новый UI плана
+      let adminPlanList = document.getElementById("admin-plan-list");
+      if (adminPlanList) {
+          window.currentPlanDataObj = data.adminPlan; // Сохраняем свежие данные
+          
+          let todayStr = new Date().toISOString().split('T')[0];
+          
+          // Строим интерфейс с фильтрами периодов
+          adminPlanList.innerHTML = `
+            <div class="inner-block card" style="padding:10px; margin-bottom:12px; display:flex; gap:6px; background:var(--card-bg);">
+                <input type="date" id="plan-filter-start" value="${todayStr}" style="flex:1; background:var(--inner-bg); border:1px solid var(--border-color); color:var(--text-color); border-radius:6px; padding:6px; font-size:12px;">
+                <input type="date" id="plan-filter-end" value="${todayStr}" style="flex:1; background:var(--inner-bg); border:1px solid var(--border-color); color:var(--text-color); border-radius:6px; padding:6px; font-size:12px;">
+                <button class="btn-green" style="margin:0; padding:6px 12px;" onclick="loadPlanHistory()">🔍</button>
+            </div>
+            <div id="plan-render-area"></div>
+          `;
+          
+          // Отрисовываем сам план
+          renderPlanUI(data.adminPlan);
+      } 
       
       if(document.querySelectorAll("#scrollable-body > div:not(.hidden)").length === 0) { switchTab('adm-main'); toggleAdminMain('plan'); }
   } else {
